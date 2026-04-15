@@ -1,0 +1,36 @@
+---
+- name: Create argocd namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    name: "{{ argocd_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Install Argo CD (stable manifests)
+  ansible.builtin.shell: |
+    k3s kubectl apply -n {{ argocd_namespace }} \
+      -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+  register: argo_install
+  changed_when: "'created' in argo_install.stdout or 'configured' in argo_install.stdout"
+
+- name: Wait for Argo CD server to be ready
+  ansible.builtin.command: >
+    k3s kubectl -n {{ argocd_namespace }} wait
+    --for=condition=Available deployment/argocd-server --timeout=300s
+  changed_when: false
+
+- name: Apply root Application (app-of-apps)
+  ansible.builtin.command: >
+    k3s kubectl apply -f {{ playbook_dir }}/../clusters/gpu-workstation/root-app.yaml
+  register: root_app_apply
+  changed_when: "'created' in root_app_apply.stdout or 'configured' in root_app_apply.stdout"
+
+- name: Print Argo CD admin password
+  ansible.builtin.shell: |
+    echo "Argo CD UI: kubectl -n argocd port-forward svc/argocd-server 8080:443"
+    echo -n "admin password: "
+    k3s kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret \
+      -o jsonpath='{.data.password}' | base64 -d
+    echo
+  changed_when: false

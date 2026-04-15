@@ -1,0 +1,66 @@
+---
+- name: Check if k3s is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+- name: Install k3s (single node, kubeconfig world-readable)
+  ansible.builtin.shell: |
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_EXEC="--write-kubeconfig-mode=644" sh -
+  when: not k3s_binary.stat.exists
+  changed_when: true
+
+- name: Ensure containerd config dir exists
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Configure containerd to use NVIDIA runtime as default
+  ansible.builtin.copy:
+    src: config.toml.tmpl
+    dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    mode: '0644'
+  notify: Restart k3s
+
+- name: Ensure k3s is enabled + running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for k3s kubeconfig
+  ansible.builtin.wait_for:
+    path: /etc/rancher/k3s/k3s.yaml
+    timeout: 60
+
+- name: Create user kubeconfig symlink
+  ansible.builtin.file:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user_id }}/.kube/config"
+    state: link
+    force: true
+  become_user: "{{ ansible_user_id }}"
+  ignore_errors: true
+
+- name: Ensure ~/.kube exists for user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user_id }}/.kube"
+    state: directory
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0755'
+
+- name: Copy kubeconfig for user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user_id }}/.kube/config"
+    remote_src: true
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0600'
+
+- name: Wait for node Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
+  changed_when: false

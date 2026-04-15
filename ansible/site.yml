@@ -1,0 +1,13 @@
+---
+- name: Provision GPU workstation
+  hosts: gpu
+  become: true
+  vars:
+    repo_url: "https://github.com/clacasse/gpu-workstation-homelab"
+    repo_branch: main
+    argocd_namespace: argocd
+  roles:
+    - base
+    - nvidia
+    - k3s
+    - argocd
