@@ -1,0 +1,15 @@
+---
+# Per-node prep: apt upgrades, utilities, hostname, NVIDIA (if GPU).
+# Idempotent. Safe to re-run. Usually invoked via:
+#   ./scripts/cluster_manager.py prep-node <host>
+- name: Base system setup
+  hosts: all
+  become: true
+  roles:
+    - base
+
+- name: NVIDIA driver and Container Toolkit on GPU nodes
+  hosts: gpu
+  become: true
+  roles:
+    - nvidia

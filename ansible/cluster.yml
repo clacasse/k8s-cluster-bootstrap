@@ -1,16 +1,6 @@
 ---
-- name: Base system setup on all nodes
-  hosts: all
-  become: true
-  roles:
-    - base
-
-- name: NVIDIA driver and Container Toolkit on GPU node
-  hosts: gpu
-  become: true
-  roles:
-    - nvidia
-
+# Cluster bootstrap: install k3s across all nodes and Argo CD on control.
+# Assumes every host has already been prepared via prep.yml.
 - name: k3s server (control plane)
   hosts: control
   become: true
@@ -23,7 +13,7 @@
   roles:
     - k3s-agent
 
-- name: Argo CD + Applications
+- name: Argo CD + root Application
   hosts: control
   become: true
   roles:

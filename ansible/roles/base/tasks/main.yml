@@ -28,3 +28,27 @@
 - name: Set timezone
   community.general.timezone:
     name: "{{ timezone | default('UTC') }}"
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ node_hostname | default(inventory_hostname_short) }}"
+  register: hostname_set
+
+- name: Ensure 127.0.1.1 maps to hostname
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ node_hostname | default(inventory_hostname_short) }}"
+    state: present
+
+- name: Renew DHCP lease so router DNS picks up new hostname
+  ansible.builtin.shell: |
+    for iface in $(ls /sys/class/net | grep -v '^lo$'); do
+      if [ -d "/sys/class/net/$iface" ] && [ "$(cat /sys/class/net/$iface/operstate 2>/dev/null)" = "up" ]; then
+        dhclient -r "$iface" 2>/dev/null || true
+        dhclient "$iface" 2>/dev/null || true
+      fi
+    done
+  when: hostname_set.changed
+  changed_when: false
+  failed_when: false

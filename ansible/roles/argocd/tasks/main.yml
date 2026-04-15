@@ -13,7 +13,7 @@
   ansible.builtin.fail:
     msg: |
       Argo Application manifests still contain REPO_URL placeholder.
-      Run ./scripts/init-fork.sh on your workstation before bootstrapping.
+      Run ./scripts/cluster_manager.py init-fork before bootstrapping.
   when: placeholder_check.rc == 0
 
 - name: Create argocd namespace
