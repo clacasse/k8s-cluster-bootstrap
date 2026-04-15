@@ -4,10 +4,11 @@
     path: /usr/local/bin/k3s
   register: k3s_binary
 
-- name: Install k3s server (single control plane, no HA)
+- name: Install k3s server (pinned version)
   ansible.builtin.shell: |
     curl -sfL https://get.k3s.io | \
-      INSTALL_K3S_EXEC="server --write-kubeconfig-mode=644" sh -
+      INSTALL_K3S_VERSION="{{ k3s_version }}" \
+      sh -s - server
   when: not k3s_binary.stat.exists
   changed_when: true
 
@@ -26,10 +27,12 @@
   ansible.builtin.slurp:
     src: /var/lib/rancher/k3s/server/node-token
   register: k3s_token_raw
+  no_log: true
 
 - name: Set k3s_token fact
   ansible.builtin.set_fact:
     k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+  no_log: true
 
 - name: Wait for kubeconfig
   ansible.builtin.wait_for:
@@ -44,7 +47,7 @@
     group: "{{ ansible_user }}"
     mode: '0755'
 
-- name: Copy kubeconfig to user
+- name: Copy kubeconfig to user (0600)
   ansible.builtin.copy:
     src: /etc/rancher/k3s/k3s.yaml
     dest: "/home/{{ ansible_user }}/.kube/config"

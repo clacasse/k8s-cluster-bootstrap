@@ -1,0 +1,27 @@
+# Root Application (app-of-apps). Ansible applies this once; Argo CD then
+# reconciles everything under applications/children/.
+#
+# NOTE: REPO_URL is a placeholder. Run ./scripts/init-fork.sh once after
+# forking+cloning to rewrite it to your fork's URL.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: REPO_URL
+    targetRevision: HEAD
+    path: clusters/homelab/applications/children
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

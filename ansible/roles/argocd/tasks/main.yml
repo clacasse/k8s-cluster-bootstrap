@@ -1,26 +1,20 @@
 ---
-- name: Detect repo URL from git remote (on controller)
+- name: Validate that init-fork.sh has been run
   ansible.builtin.command:
-    cmd: git -C "{{ playbook_dir }}/.." config --get remote.origin.url
-  register: git_remote
+    cmd: grep -q 'repoURL: REPO_URL' {{ playbook_dir }}/../clusters/{{ cluster_name }}/applications/root.yaml
+  register: placeholder_check
   changed_when: false
+  failed_when: false
   delegate_to: localhost
   become: false
   run_once: true
 
-- name: Detect current git branch (on controller)
-  ansible.builtin.command:
-    cmd: git -C "{{ playbook_dir }}/.." rev-parse --abbrev-ref HEAD
-  register: git_branch
-  changed_when: false
-  delegate_to: localhost
-  become: false
-  run_once: true
-
-- name: Set repo facts
-  ansible.builtin.set_fact:
-    repo_url: "{{ git_remote.stdout | regex_replace('^git@github\\.com:', 'https://github.com/') | regex_replace('\\.git$', '') }}"
-    repo_branch: "{{ git_branch.stdout }}"
+- name: Fail if REPO_URL placeholder still present
+  ansible.builtin.fail:
+    msg: |
+      Argo Application manifests still contain REPO_URL placeholder.
+      Run ./scripts/init-fork.sh on your workstation before bootstrapping.
+  when: placeholder_check.rc == 0
 
 - name: Create argocd namespace
   ansible.builtin.command: k3s kubectl create namespace {{ argocd_namespace }}
@@ -28,10 +22,10 @@
   failed_when: ns_create.rc != 0 and 'AlreadyExists' not in ns_create.stderr
   changed_when: ns_create.rc == 0
 
-- name: Install Argo CD (stable manifests)
+- name: Install Argo CD (pinned version)
   ansible.builtin.shell: |
     k3s kubectl apply -n {{ argocd_namespace }} \
-      -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+      -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
   register: argo_install
   changed_when: "'created' in argo_install.stdout or 'configured' in argo_install.stdout"
 
@@ -41,25 +35,27 @@
     --for=condition=Available deployment/argocd-server --timeout=300s
   changed_when: false
 
-- name: Render Argo CD Applications
-  ansible.builtin.template:
-    src: root-app.yaml.j2
-    dest: /tmp/argocd-apps.yaml
+- name: Copy root Application to control node
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../clusters/{{ cluster_name }}/applications/root.yaml"
+    dest: /tmp/argocd-root-app.yaml
     mode: '0644'
 
-- name: Apply Argo CD Applications
-  ansible.builtin.command: k3s kubectl apply -f /tmp/argocd-apps.yaml
+- name: Apply root Application
+  ansible.builtin.command: k3s kubectl apply -f /tmp/argocd-root-app.yaml
   register: apps_apply
   changed_when: "'created' in apps_apply.stdout or 'configured' in apps_apply.stdout"
 
-- name: Print Argo CD admin password + access info
+- name: Print access info
   ansible.builtin.shell: |
+    set -eu
     echo ""
-    echo "Argo CD: kubectl -n argocd port-forward svc/argocd-server 8080:443"
-    echo -n "admin password: "
-    k3s kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret \
-      -o jsonpath='{.data.password}' | base64 -d
-    echo
+    echo "Argo CD is running. Access from workstation:"
+    echo "  kubectl -n argocd port-forward svc/argocd-server 8080:443"
     echo ""
-    echo "Repo tracked: {{ repo_url }} ({{ repo_branch }})"
+    echo "Retrieve initial admin password from the control node:"
+    echo "  kubectl -n argocd get secret argocd-initial-admin-secret \\"
+    echo "    -o jsonpath='{.data.password}' | base64 -d"
+    echo ""
+    echo "Immediately change it after first login."
   changed_when: false

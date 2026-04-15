@@ -20,6 +20,14 @@ if [[ ! -f ansible/inventory.ini ]]; then
     exit 1
 fi
 
+if grep -rq 'repoURL: REPO_URL' clusters 2>/dev/null; then
+    echo
+    echo "ERROR: Argo Application manifests still contain REPO_URL placeholder."
+    echo "Run: ./scripts/init-fork.sh"
+    echo
+    exit 1
+fi
+
 if ! command -v ansible-playbook &>/dev/null; then
     echo
     echo "ERROR: Ansible not installed. Install it first:"
