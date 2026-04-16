@@ -213,6 +213,14 @@ Change it immediately after first login.
 ./scripts/cluster_manager.py status
 ```
 
+### Connect Slack (optional)
+
+```bash
+./scripts/cluster_manager.py setup-slack
+```
+
+Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens.
+
 ### Sync upstream improvements
 
 When the public template gets bug fixes or new features:
@@ -253,6 +261,7 @@ Pure git workflow — no Ansible, no DNS:
 | `models pull <tag>` | Pull a model into Ollama. |
 | `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
 | `models remove <tag>` | Delete a model from Ollama. |
+| `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
 | `sync-upstream [--remote R] [--branch B]` | Fetch + merge upstream, re-apply placeholders. |
 

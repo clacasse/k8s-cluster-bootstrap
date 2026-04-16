@@ -518,6 +518,60 @@ def setup_secrets(
         console.print(f"[green]Active model set to {model}.[/green]")
 
 
+@app.command("setup-slack")
+def setup_slack(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Configure Slack integration for OpenClaw.
+
+    Prompts for Slack Bot Token and App Token, stores them in the
+    openclaw-secrets Secret, and restarts the OpenClaw pod. Safe to
+    re-run — overwrites existing tokens.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+    console.print("Get these from your Slack app at https://api.slack.com/apps\n")
+
+    bot_token = typer.prompt("Slack Bot Token (xoxb-...)")
+    app_token = typer.prompt("Slack App Token (xapp-...)")
+
+    if not bot_token.startswith("xoxb-"):
+        console.print("[yellow]Warning: Bot token usually starts with xoxb-[/yellow]")
+    if not app_token.startswith("xapp-"):
+        console.print("[yellow]Warning: App token usually starts with xapp-[/yellow]")
+
+    # Patch the existing secret with Slack tokens
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
+        f" | sudo k3s kubectl apply -f - --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+    ], capture_output=True)
+
+    # Use kubectl patch to add the new keys
+    import base64
+    bot_b64 = base64.b64encode(bot_token.encode()).decode()
+    app_b64 = base64.b64encode(app_token.encode()).decode()
+    patch = f'{{"data":{{"slack-bot-token":"{bot_b64}","slack-app-token":"{app_b64}"}}}}'
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
+        f" --type merge -p '{patch}'",
+    ])
+
+    # Restart OpenClaw to pick up new env vars
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
+    ])
+    console.print(f"\n[green]Slack tokens configured. OpenClaw restarting.[/green]")
+
+
 def _ollama_url() -> str:
     apps_domain = _get_apps_domain()
     return f"https://ollama.{apps_domain}"

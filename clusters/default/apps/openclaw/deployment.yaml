@@ -97,6 +97,18 @@ spec:
                 secretKeyRef:
                   name: openclaw-secrets
                   key: gateway-token
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: slack-bot-token
+                  optional: true
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: slack-app-token
+                  optional: true
           readinessProbe:
             httpGet:
               path: /readyz
