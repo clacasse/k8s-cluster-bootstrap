@@ -1,23 +1,34 @@
-# Copy to inventory.ini and edit for your environment.
-# Hostnames resolve via your router's DHCP-registered DNS
-# (e.g. Ubiquiti serves k3s-gpu.localdomain once the node announces its hostname).
+# Managed by `cluster_manager.py prep-node`. You can also edit manually.
 #
 # Node roles:
-#   control - k3s server (control plane). Stable, always-on worker.
+#   control - k3s server (control plane). Stable, always-on.
 #   workers - additional k3s agents. Stable, always-on.
 #   gpu     - k3s agent with NVIDIA GPU. May reboot for driver updates.
 #
-# Add nodes as you bring them online. `cluster_manager.py prep-node <host>`
-# targets a single host; `cluster_manager.py bootstrap` targets the whole file.
+# Example after prepping three nodes:
+#
+#   [control]
+#   k3s-control ansible_host=192.168.1.10
+#
+#   [workers]
+#   k3s-worker ansible_host=192.168.1.11
+#
+#   [gpu]
+#   k3s-gpu ansible_host=192.168.1.12
+#
+#   [agents:children]
+#   workers
+#   gpu
+#
+#   [all:vars]
+#   ansible_user=ubuntu
+#   ansible_python_interpreter=/usr/bin/python3
 
 [control]
-k3s-control.localdomain
 
 [workers]
-k3s-worker.localdomain
 
 [gpu]
-k3s-gpu.localdomain
 
 [agents:children]
 workers

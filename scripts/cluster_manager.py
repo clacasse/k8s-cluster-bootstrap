@@ -3,17 +3,18 @@
 
 Single CLI wrapping the full lifecycle:
   init-fork       one-time: rewrite REPO_URL + APPS_DOMAIN placeholders
-  prep-node       per-node: apt upgrade, hostname, NVIDIA if GPU
+  prep-node       per-node: add to inventory, apt upgrade, hostname, NVIDIA if GPU
   bootstrap       whole-cluster: k3s + Argo CD
   pull-model      runtime: pull an Ollama model
   status          runtime: cluster/node/pod summary
-  sync-upstream   pull upstream changes into your private instance repo
+  sync-upstream   pull upstream changes into your instance repo
 
 Runs from your workstation. Shells out to ansible-playbook for prep/bootstrap.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,10 +32,31 @@ ANSIBLE_DIR = REPO_DIR / "ansible"
 CLUSTERS_DIR = REPO_DIR / "clusters"
 
 DEFAULT_APPS_DOMAIN = "apps.localdomain"
+VALID_ROLES = ("control", "worker", "gpu")
+
+INVENTORY_SKELETON = """\
+[control]
+
+[workers]
+
+[gpu]
+
+[agents:children]
+workers
+gpu
+
+[all:vars]
+ansible_user={user}
+ansible_python_interpreter=/usr/bin/python3
+"""
 
 console = Console()
 app = typer.Typer(add_completion=False, help=__doc__, no_args_is_help=True)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _run(cmd: list[str], cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
@@ -50,7 +72,7 @@ def _require_ansible() -> None:
 def _require_inventory() -> None:
     if not (ANSIBLE_DIR / "inventory.ini").exists():
         console.print("[red]ansible/inventory.ini not found.[/red]")
-        console.print("  cp ansible/inventory.ini.example ansible/inventory.ini")
+        console.print("  Run prep-node to create it, or: cp ansible/inventory.ini.example ansible/inventory.ini")
         raise typer.Exit(1)
 
 
@@ -94,6 +116,86 @@ def _get_apps_domain() -> str:
                     return parts[1]
     return DEFAULT_APPS_DOMAIN
 
+
+def _authorize_host_key(host: str) -> None:
+    """Add the host's SSH key to known_hosts if not already present."""
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    known_hosts.parent.mkdir(mode=0o700, exist_ok=True)
+
+    result = subprocess.run(
+        ["ssh-keyscan", "-H", host],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        console.print(f"[yellow]Could not scan SSH host key for {host}[/yellow]")
+        return
+
+    new_keys = [l for l in result.stdout.strip().splitlines() if l and not l.startswith("#")]
+    if not new_keys:
+        return
+
+    with known_hosts.open("a") as f:
+        for key in new_keys:
+            f.write(key + "\n")
+    console.print(f"  [green]✓[/green] SSH host key authorized for {host}")
+
+
+def _role_to_group(role: str) -> str:
+    """Map a user-facing role name to the inventory group name."""
+    return "workers" if role == "worker" else role
+
+
+def _ensure_inventory(user: str) -> Path:
+    """Create inventory.ini from skeleton if it doesn't exist. Returns its path."""
+    inv = ANSIBLE_DIR / "inventory.ini"
+    if not inv.exists():
+        inv.write_text(INVENTORY_SKELETON.format(user=user))
+        console.print(f"  [green]✓[/green] Created {inv.relative_to(REPO_DIR)}")
+    return inv
+
+
+def _add_to_inventory(inv: Path, hostname: str, ip: str, role: str, user: str) -> None:
+    """Add a host entry to the correct group in inventory.ini. Idempotent."""
+    text = inv.read_text()
+    entry = f"{hostname} ansible_host={ip}"
+
+    # Check if this host is already present (by hostname or IP)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(hostname + " ") or stripped == hostname:
+            console.print(f"  [dim]{hostname} already in inventory[/dim]")
+            return
+        if f"ansible_host={ip}" in stripped:
+            console.print(f"  [yellow]{ip} already in inventory as {stripped.split()[0]}[/yellow]")
+            return
+
+    group = _role_to_group(role)
+    group_header = f"[{group}]"
+
+    # Update ansible_user if different
+    if f"ansible_user={user}" not in text:
+        text = re.sub(r"ansible_user=\S+", f"ansible_user={user}", text)
+
+    lines = text.splitlines()
+    result = []
+    inserted = False
+    for i, line in enumerate(lines):
+        result.append(line)
+        if line.strip() == group_header and not inserted:
+            result.append(entry)
+            inserted = True
+
+    if not inserted:
+        console.print(f"[red]Could not find [{group}] section in inventory.[/red]")
+        raise typer.Exit(1)
+
+    inv.write_text("\n".join(result) + "\n")
+    console.print(f"  [green]✓[/green] Added {entry} to [{group}]")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 
 @app.command("init-fork")
 def init_fork(
@@ -155,13 +257,12 @@ def sync_upstream(
         help="Upstream branch to merge.",
     ),
 ) -> None:
-    """Pull upstream changes into your private instance repo.
+    """Pull upstream changes into your instance repo.
 
     Fetches from the upstream remote, merges, then re-runs init-fork to
     rewrite any new REPO_URL/APPS_DOMAIN placeholders that arrived with
     the merge. Commits the result if any placeholders were replaced.
     """
-    # Verify upstream remote exists
     result = subprocess.run(
         ["git", "remote", "get-url", remote],
         capture_output=True, text=True, cwd=REPO_DIR,
@@ -192,7 +293,6 @@ def sync_upstream(
 
     console.print("[green]Merge successful.[/green]")
 
-    # Re-apply placeholders: detect current repo URL + apps domain
     repo_url = _get_repo_url()
     apps_domain = _get_apps_domain()
 
@@ -223,53 +323,53 @@ def sync_upstream(
     console.print("\n[green]Sync complete.[/green] Push when ready: git push")
 
 
-def _authorize_host_key(host: str) -> None:
-    """Add the host's SSH key to known_hosts if not already present."""
-    known_hosts = Path.home() / ".ssh" / "known_hosts"
-    known_hosts.parent.mkdir(mode=0o700, exist_ok=True)
-
-    existing = known_hosts.read_text() if known_hosts.exists() else ""
-    result = subprocess.run(
-        ["ssh-keyscan", "-H", host],
-        capture_output=True, text=True, timeout=10,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        console.print(f"[yellow]Could not scan SSH host key for {host}[/yellow]")
-        return
-
-    new_keys = []
-    for line in result.stdout.strip().splitlines():
-        if line and not line.startswith("#"):
-            new_keys.append(line)
-
-    if not new_keys:
-        return
-
-    # ssh-keyscan -H hashes the hostname, so we can't simply grep for the host.
-    # Append all keys; ssh handles duplicates gracefully.
-    with known_hosts.open("a") as f:
-        for key in new_keys:
-            f.write(key + "\n")
-    console.print(f"  [green]✓[/green] SSH host key authorized for {host}")
-
-
 @app.command("prep-node")
 def prep_node(
-    host: str = typer.Argument(..., help="Inventory hostname or IP to prep (e.g. k3s-gpu)."),
+    ip: str = typer.Argument(..., help="IP address of the node to prepare."),
+    hostname: str = typer.Option(
+        None, "--hostname", "-n",
+        help="Hostname to assign (e.g. k3s-control). Prompted if not provided.",
+    ),
+    role: str = typer.Option(
+        None, "--role", "-r",
+        help="Node role: control, worker, or gpu. Prompted if not provided.",
+    ),
+    user: str = typer.Option(
+        "ubuntu", "--user", "-u",
+        help="SSH user on the node.",
+    ),
     extra: list[str] = typer.Argument(None, help="Extra args passed through to ansible-playbook."),
 ) -> None:
-    """Per-node prep: authorize SSH key, apt upgrade, hostname, NVIDIA on GPU nodes.
+    """Prep a new node: add to inventory, authorize SSH key, apt upgrade, set hostname.
 
-    The host must already be in ansible/inventory.ini. Idempotent.
+    Adds the node to ansible/inventory.ini (creating it if needed), authorizes
+    the SSH host key, then runs the Ansible prep playbook against it.
     """
     _require_ansible()
-    _require_inventory()
-    _authorize_host_key(host)
+
+    if hostname is None:
+        hostname = typer.prompt("Hostname to assign to this node (e.g. k3s-control)")
+    if role is None:
+        role = typer.prompt(
+            "Node role",
+            type=typer.Choice(VALID_ROLES, case_sensitive=False),
+        )
+    role = role.lower()
+    if role not in VALID_ROLES:
+        console.print(f"[red]Invalid role '{role}'. Must be one of: {', '.join(VALID_ROLES)}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\nPrepping [cyan]{ip}[/cyan] as [cyan]{hostname}[/cyan] (role: {role})")
+
+    inv = _ensure_inventory(user)
+    _add_to_inventory(inv, hostname, ip, role, user)
+    _authorize_host_key(ip)
+
     cmd = [
         "ansible-playbook",
         "-i", "inventory.ini",
         "prep.yml",
-        "--limit", host,
+        "--limit", hostname,
         "--ask-become-pass",
     ]
     if extra:

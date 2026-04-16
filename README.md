@@ -116,46 +116,45 @@ In future sessions: `source .venv/bin/activate` before running the CLI.
 
 ### 3. Initialize placeholders
 
-This rewrites `REPO_URL` and `APPS_DOMAIN` in the cluster manifests to point at your instance repo and your LAN domain.
+This rewrites `REPO_URL` and `APPS_DOMAIN` in the cluster manifests to point at your instance repo and your LAN domain. It prompts for the domain (default: `apps.localdomain`).
 
 ```bash
 ./scripts/cluster_manager.py init-fork
-# pass --apps-domain <your.domain> if not using apps.localdomain
 git commit -am "Initialize instance"
 git push
 ```
 
-### 4. Configure your nodes
+### 4. Prep every node
+
+Run once per node. Pass the node's IP — the command prompts for a hostname and role, adds the node to `ansible/inventory.ini` (creating it if needed), authorizes the SSH host key, and runs the Ansible prep playbook.
 
 ```bash
-cp ansible/inventory.ini.example ansible/inventory.ini
-$EDITOR ansible/inventory.ini
+# Prompts for hostname and role interactively:
+./scripts/cluster_manager.py prep-node 192.168.1.10
+./scripts/cluster_manager.py prep-node 192.168.1.12
+
+# Or pass everything on the command line:
+./scripts/cluster_manager.py prep-node 192.168.1.10 --hostname k3s-control --role control
+./scripts/cluster_manager.py prep-node 192.168.1.11 --hostname k3s-worker --role worker
+./scripts/cluster_manager.py prep-node 192.168.1.12 --hostname k3s-gpu --role gpu
 ```
 
-Commit it to your instance repo so it's tracked:
+After each node is prepped, its hostname is set and registered in router DNS — you can SSH to it by name (e.g. `k3s-control.localdomain`).
+
+Commit the inventory so it's tracked:
 ```bash
 git add ansible/inventory.ini
 git commit -m "Add inventory"
 git push
 ```
 
-### 5. Prep every node
-
-Run once per host. Idempotent — safe to re-run anytime. Automatically authorizes the node's SSH host key before connecting.
-
-```bash
-./scripts/cluster_manager.py prep-node k3s-control.localdomain
-./scripts/cluster_manager.py prep-node k3s-worker.localdomain
-./scripts/cluster_manager.py prep-node k3s-gpu.localdomain
-```
-
-### 6. Bootstrap the cluster
+### 5. Bootstrap the cluster
 
 ```bash
 ./scripts/cluster_manager.py bootstrap
 ```
 
-### 7. Verify
+### 6. Verify
 
 ```bash
 ./scripts/cluster_manager.py status
@@ -213,9 +212,8 @@ Pure git workflow — no Ansible, no DNS:
 ### Add a new node
 
 1. Install Ubuntu on the new machine.
-2. Add it to `ansible/inventory.ini` in the appropriate group.
-3. `./scripts/cluster_manager.py prep-node <new-host>` (handles SSH host key automatically)
-4. `./scripts/cluster_manager.py bootstrap` — idempotent; only the new node actually changes.
+2. `./scripts/cluster_manager.py prep-node <ip>` — prompts for hostname and role, adds to inventory, preps the node.
+3. `./scripts/cluster_manager.py bootstrap` — idempotent; only the new node actually changes.
 
 ## The CLI
 
@@ -224,7 +222,7 @@ Pure git workflow — no Ansible, no DNS:
 | Command | Purpose |
 |---|---|
 | `init-fork [URL] [--apps-domain D]` | Rewrite `REPO_URL` + `APPS_DOMAIN` placeholders in cluster manifests. |
-| `prep-node <host>` | Run `ansible/prep.yml` against one host (apt upgrade, hostname, NVIDIA). |
+| `prep-node <ip> [--hostname H] [--role R]` | Add node to inventory, authorize SSH key, run prep playbook (apt upgrade, hostname, NVIDIA). |
 | `bootstrap` | Run `ansible/cluster.yml` against the whole inventory (k3s + Argo CD). |
 | `pull-model <tag> [--host H]` | Pull a model into the running Ollama server. |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
