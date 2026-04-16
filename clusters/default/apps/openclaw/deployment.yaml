@@ -25,6 +25,9 @@ spec:
               {
                 "gateway": {
                   "bind": "lan",
+                  "auth": {
+                    "allowTokenOnlyOperatorWithoutPairing": true
+                  },
                   "controlUi": {
                     "allowedOrigins": ["*"]
                   }
