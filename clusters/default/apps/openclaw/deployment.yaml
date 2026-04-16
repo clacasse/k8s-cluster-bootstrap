@@ -21,6 +21,7 @@ spec:
             - sh
             - -c
             - |
+              MODEL_ID="${ACTIVE_MODEL:-gemma4:26b}"
               cat > /data/openclaw.json <<CONF
               {
                 "gateway": {
@@ -41,8 +42,8 @@ spec:
                       "api": "ollama",
                       "models": [
                         {
-                          "id": "gemma4:26b",
-                          "name": "gemma4:26b",
+                          "id": "${MODEL_ID}",
+                          "name": "${MODEL_ID}",
                           "reasoning": false,
                           "input": ["text", "image"],
                           "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
@@ -56,7 +57,7 @@ spec:
                 "agents": {
                   "defaults": {
                     "model": {
-                      "primary": "ollama/gemma4:26b"
+                      "primary": "ollama/${MODEL_ID}"
                     }
                   }
                 }
@@ -68,6 +69,11 @@ spec:
                 secretKeyRef:
                   name: openclaw-secrets
                   key: gateway-token
+            - name: ACTIVE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: openclaw-model
+                  key: active-model
           volumeMounts:
             - name: data
               mountPath: /data

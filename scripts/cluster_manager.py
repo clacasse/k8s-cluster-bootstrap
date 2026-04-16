@@ -5,7 +5,8 @@ Single CLI wrapping the full lifecycle:
   init-fork       one-time: rewrite REPO_URL + APPS_DOMAIN placeholders
   prep-node       per-node: add to inventory, apt upgrade, hostname, NVIDIA if GPU
   bootstrap       whole-cluster: k3s + Argo CD
-  pull-model      runtime: pull an Ollama model
+  setup-secrets   one-time: create TLS cert, OpenClaw token, initial model
+  models          runtime: list, pull, set, remove Ollama models
   status          runtime: cluster/node/pod summary
   sync-upstream   pull upstream changes into your instance repo
 
@@ -499,27 +500,138 @@ def setup_secrets(
         console.print(f"[bold]Save this token — you'll need it to log into the OpenClaw web UI:[/bold]")
         console.print(f"\n  [cyan]{token}[/cyan]\n")
 
+    # --- OpenClaw active model ConfigMap ---
+    result = subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
+         "get", "configmap", "openclaw-model", "--ignore-not-found", "-o", "name"],
+        capture_output=True, text=True,
+    )
+    if result.stdout.strip():
+        console.print("[dim]openclaw-model ConfigMap already exists, skipping.[/dim]")
+    else:
+        model = typer.prompt("Default model for OpenClaw (e.g. gemma4:26b)")
+        subprocess.run([
+            "ssh", control,
+            f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
+            f" --from-literal=active-model={model}",
+        ])
+        console.print(f"[green]Active model set to {model}.[/green]")
 
-@app.command("pull-model")
-def pull_model(
-    model: str = typer.Argument(..., help="Model tag, e.g. llama3.3:70b"),
-    host: str = typer.Option(
-        None,
-        "--host", "-h",
-        help="Ollama endpoint host[:port]. Auto-detected from cluster manifests if not provided.",
-    ),
+
+def _ollama_url() -> str:
+    apps_domain = _get_apps_domain()
+    return f"https://ollama.{apps_domain}"
+
+
+def _kubectl_ssh(control: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl", *args],
+        capture_output=capture, text=capture,
+    )
+
+
+models_app = typer.Typer(name="models", help="Manage Ollama models and OpenClaw model selection.", no_args_is_help=True)
+app.add_typer(models_app)
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Show models available in Ollama (already pulled)."""
+    import json
+    url = f"{_ollama_url()}/api/tags"
+    result = subprocess.run(
+        ["curl", "-sk", url], capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]Could not reach Ollama at {url}[/red]")
+        raise typer.Exit(1)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        console.print(f"[red]Unexpected response from Ollama[/red]")
+        raise typer.Exit(1)
+
+    models = data.get("models", [])
+    if not models:
+        console.print("[dim]No models pulled yet.[/dim]")
+        return
+
+    # Show active model
+    control = _get_control_host()
+    active = subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
+         "get", "configmap", "openclaw-model", "-o", "jsonpath={.data.active-model}",
+         "--ignore-not-found"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+    for m in models:
+        name = m.get("name", m.get("model", "unknown"))
+        size_gb = m.get("size", 0) / 1e9
+        marker = " [green](active)[/green]" if name == active else ""
+        console.print(f"  {name}  [dim]{size_gb:.1f} GB[/dim]{marker}")
+
+
+@models_app.command("pull")
+def models_pull(
+    model: str = typer.Argument(..., help="Model tag, e.g. gemma4:26b"),
 ) -> None:
-    """Pull a model into the running Ollama server."""
-    if host is None:
-        apps_domain = _get_apps_domain()
-        host = f"ollama.{apps_domain}"
-    url = f"http://{host}/api/pull"
+    """Pull a model into Ollama."""
+    url = f"{_ollama_url()}/api/pull"
     console.print(f"Pulling [cyan]{model}[/cyan] from [dim]{url}[/dim]")
     rc = subprocess.run(
-        ["curl", "-fsSN", url, "-d", f'{{"name":"{model}"}}']
+        ["curl", "-fsSNk", url, "-d", f'{{"name":"{model}"}}']
     ).returncode
     if rc == 0:
         console.print("\n[green]Done.[/green]")
+    raise typer.Exit(rc)
+
+
+@models_app.command("set")
+def models_set(
+    model: str = typer.Argument(..., help="Model tag to set as active, e.g. gemma4:26b"),
+) -> None:
+    """Set the active model for OpenClaw. Restarts the OpenClaw pod."""
+    control = _get_control_host()
+
+    # Update or create the ConfigMap
+    console.print(f"Setting active model to [cyan]{model}[/cyan]")
+    _kubectl_ssh(control, "-n", "openclaw",
+                 "create", "configmap", "openclaw-model",
+                 f"--from-literal=active-model={model}",
+                 "--dry-run=client", "-o", "yaml",
+                 "|", "sudo", "k3s", "kubectl", "apply", "-f", "-")
+    # The pipe doesn't work with the list form — use shell
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
+        f" --from-literal=active-model={model}"
+        f" --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+    ])
+
+    # Restart OpenClaw to pick up the new model
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
+    ])
+    console.print(f"[green]Active model set to {model}. OpenClaw restarting.[/green]")
+
+
+@models_app.command("remove")
+def models_remove(
+    model: str = typer.Argument(..., help="Model tag to remove, e.g. llama3.2:3b"),
+) -> None:
+    """Delete a model from Ollama."""
+    url = f"{_ollama_url()}/api/delete"
+    console.print(f"Removing [cyan]{model}[/cyan]")
+    rc = subprocess.run(
+        ["curl", "-fsk", "-X", "DELETE", url, "-d", f'{{"name":"{model}"}}']
+    ).returncode
+    if rc == 0:
+        console.print("[green]Done.[/green]")
+    else:
+        console.print("[red]Failed to remove model.[/red]")
     raise typer.Exit(rc)
 
 

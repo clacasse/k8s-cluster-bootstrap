@@ -157,13 +157,16 @@ git push
 
 ### 6. Create secrets
 
-Some apps (e.g. OpenClaw) require secrets that aren't stored in git. This generates them and creates the Kubernetes secrets on the cluster. Run once after bootstrap.
+Generates secrets and runtime config that aren't stored in git. Run once after bootstrap.
 
 ```bash
 ./scripts/cluster_manager.py setup-secrets
 ```
 
-Save the OpenClaw gateway token it prints — you'll need it to log into the web UI.
+This creates:
+- Wildcard TLS certificate for `*.APPS_DOMAIN` (self-signed, 10-year)
+- OpenClaw gateway token (save it — needed for the web UI)
+- Initial model selection for OpenClaw (prompts you to choose)
 
 ### 7. Verify
 
@@ -188,10 +191,20 @@ Change it immediately after first login.
 
 ## Day-to-day operations
 
-### Pull a model
+### Manage models
 
 ```bash
-./scripts/cluster_manager.py pull-model llama3.3:70b
+# See what's pulled and which is active
+./scripts/cluster_manager.py models list
+
+# Pull a new model
+./scripts/cluster_manager.py models pull llama3.3:70b
+
+# Switch the active model (restarts OpenClaw)
+./scripts/cluster_manager.py models set llama3.3:70b
+
+# Remove a model you no longer need
+./scripts/cluster_manager.py models remove llama3.2:3b
 ```
 
 ### Check cluster status
@@ -235,8 +248,11 @@ Pure git workflow — no Ansible, no DNS:
 | `init-fork [URL] [--apps-domain D]` | Rewrite `REPO_URL` + `APPS_DOMAIN` placeholders in cluster manifests. |
 | `prep-node <ip> [--hostname H] [--role R]` | Add node to inventory, authorize SSH key, run prep playbook (apt upgrade, hostname, NVIDIA). |
 | `bootstrap` | Run `ansible/cluster.yml` against the whole inventory (k3s + Argo CD). |
-| `setup-secrets` | Generate and create Kubernetes secrets required by cluster apps. |
-| `pull-model <tag> [--host H]` | Pull a model into the running Ollama server. |
+| `setup-secrets` | Generate TLS cert, OpenClaw token, and initial model selection. |
+| `models list` | Show pulled Ollama models and which is active. |
+| `models pull <tag>` | Pull a model into Ollama. |
+| `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
+| `models remove <tag>` | Delete a model from Ollama. |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
 | `sync-upstream [--remote R] [--branch B]` | Fetch + merge upstream, re-apply placeholders. |
 
