@@ -335,8 +335,8 @@ def prep_node(
         help="Node role: control, worker, or gpu. Prompted if not provided.",
     ),
     user: str = typer.Option(
-        "ubuntu", "--user", "-u",
-        help="SSH user on the node.",
+        None, "--user", "-u",
+        help="SSH user on the node. Prompted if not provided.",
     ),
     extra: list[str] = typer.Argument(None, help="Extra args passed through to ansible-playbook."),
 ) -> None:
@@ -349,6 +349,8 @@ def prep_node(
 
     if hostname is None:
         hostname = typer.prompt("Hostname to assign to this node (e.g. k3s-control)")
+    if user is None:
+        user = typer.prompt("SSH user on the node")
     if role is None:
         import click
         role = typer.prompt(
@@ -401,12 +403,15 @@ def bootstrap(
 def pull_model(
     model: str = typer.Argument(..., help="Model tag, e.g. llama3.3:70b"),
     host: str = typer.Option(
-        f"ollama.{DEFAULT_APPS_DOMAIN}",
+        None,
         "--host", "-h",
-        help="Ollama endpoint host[:port]. Defaults to the Ingress hostname.",
+        help="Ollama endpoint host[:port]. Auto-detected from cluster manifests if not provided.",
     ),
 ) -> None:
     """Pull a model into the running Ollama server."""
+    if host is None:
+        apps_domain = _get_apps_domain()
+        host = f"ollama.{apps_domain}"
     url = f"http://{host}/api/pull"
     console.print(f"Pulling [cyan]{model}[/cyan] from [dim]{url}[/dim]")
     rc = subprocess.run(
