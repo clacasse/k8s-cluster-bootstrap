@@ -58,7 +58,8 @@ spec:
                   "defaults": {
                     "model": {
                       "primary": "ollama/${MODEL_ID}"
-                    }
+                    },
+                    "workspace": "/vault"
                   }
                 }
               }
@@ -131,7 +132,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /home/node/.openclaw
+            - name: vault
+              mountPath: /vault
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: openclaw-data
+        - name: vault
+          persistentVolumeClaim:
+            claimName: vault-data

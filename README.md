@@ -221,6 +221,21 @@ Change it immediately after first login.
 
 Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens.
 
+### Set up file sync (Syncthing)
+
+Syncthing provides real-time bidirectional file sync between your workstation and the cluster. OpenClaw uses the synced folder as its workspace — it can read your files and write back to them.
+
+1. Install Syncthing on your Mac: `brew install syncthing`
+2. Start it: `brew services start syncthing` (or `syncthing` in a terminal)
+3. Open `https://syncthing.apps` in your browser — this is the cluster-side Syncthing UI
+4. Open `http://localhost:8384` — this is your Mac's Syncthing UI
+5. In your Mac's Syncthing UI: **Add Remote Device** using the Device ID shown in the cluster UI
+6. Accept the pairing request in the cluster UI
+7. In your Mac's Syncthing UI: **Add Folder**, select your Obsidian vault path, share it with the cluster device
+8. In the cluster UI: accept the folder, set the path to `/var/syncthing/vault`
+
+Files sync in real-time. Edits on your Mac appear in the cluster within seconds; files the agent writes appear on your Mac (and propagate to other devices via Obsidian Sync).
+
 ### Sync upstream improvements
 
 When the public template gets bug fixes or new features:
@@ -305,13 +320,15 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │   └── children/               # reconciled by root
         │       ├── ollama.yaml
         │       ├── openclaw.yaml
+        │       ├── syncthing.yaml
         │       ├── nvidia-device-plugin.yaml
         │       ├── node-feature-discovery.yaml
         │       └── argocd-ingress.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
             ├── ollama/
-            └── openclaw/
+            ├── openclaw/
+            └── syncthing/
 ```
 
 ## Version pinning
@@ -326,6 +343,7 @@ All pinned in `ansible/group_vars/all.yml`:
 | OpenClaw | `2026.4.14` |
 | NVIDIA device plugin Helm chart | `0.17.0` |
 | Node Feature Discovery Helm chart | `0.18.3` |
+| Syncthing | `1.29` |
 
 Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 
