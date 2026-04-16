@@ -14,6 +14,23 @@ spec:
       labels:
         app: openclaw
     spec:
+      initContainers:
+        - name: write-config
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              cat > /data/openclaw.json <<'CONF'
+              {
+                "gateway": {
+                  "bind": "lan"
+                }
+              }
+              CONF
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: openclaw
           image: ghcr.io/openclaw/openclaw:2026.4.14
@@ -25,8 +42,6 @@ spec:
               value: production
             - name: OPENCLAW_SKIP_SERVICE_CHECK
               value: "true"
-            - name: OPENCLAW_GATEWAY_BIND
-              value: lan
             - name: OLLAMA_API_KEY
               value: ollama-local
             - name: OLLAMA_BASE_URL
@@ -40,13 +55,13 @@ spec:
             httpGet:
               path: /readyz
               port: 18789
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: 18789
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 30
           resources:
             requests:
@@ -57,7 +72,7 @@ spec:
               memory: 1Gi
           volumeMounts:
             - name: data
-              mountPath: /home/openclaw/.openclaw
+              mountPath: /home/node/.openclaw
       volumes:
         - name: data
           persistentVolumeClaim:
