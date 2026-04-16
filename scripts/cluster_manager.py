@@ -190,7 +190,7 @@ def _add_to_inventory(inv: Path, hostname: str, ip: str, role: str, user: str) -
         raise typer.Exit(1)
 
     inv.write_text("\n".join(result) + "\n")
-    console.print(f"  [green]✓[/green] Added {entry} to [{group}]")
+    console.print(f"  [green]✓[/green] Added {entry} to \\[{group}]")
 
 
 # ---------------------------------------------------------------------------
