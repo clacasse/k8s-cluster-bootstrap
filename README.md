@@ -9,6 +9,7 @@ Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes �
 - **k3s** cluster: 1 server + N agents (no HA)
 - **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `http://argocd.apps`
 - **Ollama** deployed to the GPU node with a persistent local-path PVC — at `http://ollama.apps`
+- **Node Feature Discovery (NFD)** auto-labels nodes with hardware info (PCI devices, CPU features)
 - **NVIDIA device plugin** installed via Helm so pods can request `nvidia.com/gpu: 1`
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
 - A single Python CLI (`cluster_manager.py`) that drives the whole lifecycle
@@ -267,6 +268,7 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │   └── children/               # reconciled by root
         │       ├── ollama.yaml
         │       ├── nvidia-device-plugin.yaml
+        │       ├── node-feature-discovery.yaml
         │       └── argocd-ingress.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
@@ -283,6 +285,7 @@ All pinned in `ansible/group_vars/all.yml`:
 | Argo CD | `v2.14.3` |
 | Ollama | `0.6.5` |
 | NVIDIA device plugin Helm chart | `0.17.0` |
+| Node Feature Discovery Helm chart | `0.18.3` |
 
 Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 
