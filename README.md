@@ -267,12 +267,14 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │   ├── root.yaml               # app-of-apps, applied by Ansible
         │   └── children/               # reconciled by root
         │       ├── ollama.yaml
+        │       ├── openclaw.yaml
         │       ├── nvidia-device-plugin.yaml
         │       ├── node-feature-discovery.yaml
         │       └── argocd-ingress.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
-            └── ollama/
+            ├── ollama/
+            └── openclaw/
 ```
 
 ## Version pinning
@@ -283,7 +285,8 @@ All pinned in `ansible/group_vars/all.yml`:
 |---|---|
 | k3s | `v1.32.3+k3s1` |
 | Argo CD | `v2.14.3` |
-| Ollama | `0.6.5` |
+| Ollama | `0.20.7` |
+| OpenClaw | `2026.4.14` |
 | NVIDIA device plugin Helm chart | `0.17.0` |
 | Node Feature Discovery Helm chart | `0.18.3` |
 

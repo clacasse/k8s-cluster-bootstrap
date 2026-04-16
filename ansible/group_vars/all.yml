@@ -5,6 +5,7 @@ argocd_version: "v2.14.3"
 nvidia_device_plugin_chart_version: "0.17.0"
 nfd_chart_version: "0.18.3"
 ollama_image: "ollama/ollama:0.20.7"
+openclaw_image: "ghcr.io/openclaw/openclaw:2026.4.14"
 
 # Cluster name used in the clusters/<name>/ directory layout.
 cluster_name: "default"
