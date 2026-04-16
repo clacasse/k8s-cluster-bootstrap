@@ -373,7 +373,7 @@ def prep_node(
         "-i", "inventory.ini",
         "prep.yml",
         "--limit", hostname,
-        "--ask-become-pass",
+        "--become",
     ]
     if extra:
         cmd.extend(extra)
@@ -392,7 +392,7 @@ def bootstrap(
         "ansible-playbook",
         "-i", "inventory.ini",
         "cluster.yml",
-        "--ask-become-pass",
+        "--become",
     ]
     if extra:
         cmd.extend(extra)
