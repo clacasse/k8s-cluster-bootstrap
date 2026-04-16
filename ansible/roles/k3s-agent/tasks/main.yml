@@ -20,18 +20,10 @@
       agent
       {% endif %}
 
-- name: Ensure containerd config dir exists (GPU node only)
+- name: Remove custom containerd config if present (k3s auto-detects NVIDIA runtime)
   ansible.builtin.file:
-    path: /var/lib/rancher/k3s/agent/etc/containerd
-    state: directory
-    mode: '0755'
-  when: inventory_hostname in groups['gpu']
-
-- name: Configure containerd NVIDIA runtime (GPU node only)
-  ansible.builtin.copy:
-    src: config.toml.tmpl
-    dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
-    mode: '0644'
+    path: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    state: absent
   when: inventory_hostname in groups['gpu']
   notify: Restart k3s-agent
 
