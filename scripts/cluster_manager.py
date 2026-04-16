@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cluster manager for the k8s homelab.
+"""Cluster manager for k8s-cluster-bootstrap.
 
 Single CLI wrapping the full lifecycle:
   init-fork       one-time: rewrite REPO_URL + APPS_DOMAIN placeholders
@@ -162,7 +162,7 @@ def sync_upstream(
     )
     if result.returncode != 0:
         console.print(f"[red]Remote '{remote}' not found.[/red] Add it first:")
-        console.print(f"  git remote add {remote} https://github.com/<upstream-owner>/k8s-cluster-homelab.git")
+        console.print(f"  git remote add {remote} https://github.com/<upstream-owner>/k8s-cluster-bootstrap.git")
         raise typer.Exit(1)
 
     console.print(f"Fetching [cyan]{remote}/{branch}[/cyan]...")

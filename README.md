@@ -1,4 +1,4 @@
-# k8s Cluster Homelab
+# k8s Cluster Bootstrap
 
 Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster running Ollama on the GPU, managed by Argo CD.
 
@@ -20,11 +20,11 @@ This is a **public template repo**. It contains the generic infrastructure code 
 Instead, you create your own **instance repo** from it. The `init-fork` command rewrites the placeholders with your repo's URL and your LAN's domain. Argo CD reconciles from your instance repo.
 
 ```
-k8s-cluster-homelab (upstream)        your-homelab (instance)
+k8s-cluster-bootstrap (upstream)        my-cluster (instance)
 ├── ansible/                          ├── ansible/
 ├── scripts/cluster_manager.py        ├── scripts/cluster_manager.py
 ├── clusters/                         ├── clusters/
-│   repoURL: REPO_URL                 │   repoURL: https://github.com/you/your-homelab
+│   repoURL: REPO_URL                 │   repoURL: https://github.com/you/my-cluster
 │   host: argocd.APPS_DOMAIN          │   host: argocd.apps.localdomain
 └── README.md                         ├── ansible/inventory.ini
                                       └── your custom apps...
@@ -94,13 +94,13 @@ All commands run on your workstation.
 
 ```bash
 # Create a new repo on GitHub (pick any name you like).
-gh repo create <you>/homelab
+gh repo create <you>/my-cluster
 
 # Clone this upstream template, then re-point origin at your instance repo.
-git clone https://github.com/<upstream-owner>/k8s-cluster-homelab.git homelab
-cd homelab
-git remote set-url origin git@github.com:<you>/homelab.git
-git remote add upstream https://github.com/<upstream-owner>/k8s-cluster-homelab.git
+git clone https://github.com/<upstream-owner>/k8s-cluster-bootstrap.git my-cluster
+cd my-cluster
+git remote set-url origin git@github.com:<you>/my-cluster.git
+git remote add upstream https://github.com/<upstream-owner>/k8s-cluster-bootstrap.git
 git push -u origin main
 ```
 
