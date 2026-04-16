@@ -139,17 +139,9 @@ git commit -m "Add inventory"
 git push
 ```
 
-### 5. Authorize SSH host keys
+### 5. Prep every node
 
-```bash
-for host in $(awk '/^\[/{g=$0} g!~/vars|children/ && /\./ {print $1}' ansible/inventory.ini); do
-    ssh-keyscan -H "$host" >> ~/.ssh/known_hosts
-done
-```
-
-### 6. Prep every node
-
-Run once per host. Idempotent — safe to re-run anytime.
+Run once per host. Idempotent — safe to re-run anytime. Automatically authorizes the node's SSH host key before connecting.
 
 ```bash
 ./scripts/cluster_manager.py prep-node k3s-control.localdomain
@@ -157,13 +149,13 @@ Run once per host. Idempotent — safe to re-run anytime.
 ./scripts/cluster_manager.py prep-node k3s-gpu.localdomain
 ```
 
-### 7. Bootstrap the cluster
+### 6. Bootstrap the cluster
 
 ```bash
 ./scripts/cluster_manager.py bootstrap
 ```
 
-### 8. Verify
+### 7. Verify
 
 ```bash
 ./scripts/cluster_manager.py status
@@ -222,9 +214,8 @@ Pure git workflow — no Ansible, no DNS:
 
 1. Install Ubuntu on the new machine.
 2. Add it to `ansible/inventory.ini` in the appropriate group.
-3. `ssh-keyscan -H <new-host> >> ~/.ssh/known_hosts`
-4. `./scripts/cluster_manager.py prep-node <new-host>`
-5. `./scripts/cluster_manager.py bootstrap` — idempotent; only the new node actually changes.
+3. `./scripts/cluster_manager.py prep-node <new-host>` (handles SSH host key automatically)
+4. `./scripts/cluster_manager.py bootstrap` — idempotent; only the new node actually changes.
 
 ## The CLI
 

@@ -223,17 +223,48 @@ def sync_upstream(
     console.print("\n[green]Sync complete.[/green] Push when ready: git push")
 
 
+def _authorize_host_key(host: str) -> None:
+    """Add the host's SSH key to known_hosts if not already present."""
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    known_hosts.parent.mkdir(mode=0o700, exist_ok=True)
+
+    existing = known_hosts.read_text() if known_hosts.exists() else ""
+    result = subprocess.run(
+        ["ssh-keyscan", "-H", host],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        console.print(f"[yellow]Could not scan SSH host key for {host}[/yellow]")
+        return
+
+    new_keys = []
+    for line in result.stdout.strip().splitlines():
+        if line and not line.startswith("#"):
+            new_keys.append(line)
+
+    if not new_keys:
+        return
+
+    # ssh-keyscan -H hashes the hostname, so we can't simply grep for the host.
+    # Append all keys; ssh handles duplicates gracefully.
+    with known_hosts.open("a") as f:
+        for key in new_keys:
+            f.write(key + "\n")
+    console.print(f"  [green]✓[/green] SSH host key authorized for {host}")
+
+
 @app.command("prep-node")
 def prep_node(
-    host: str = typer.Argument(..., help="Inventory hostname to prep (e.g. k3s-gpu)."),
+    host: str = typer.Argument(..., help="Inventory hostname or IP to prep (e.g. k3s-gpu)."),
     extra: list[str] = typer.Argument(None, help="Extra args passed through to ansible-playbook."),
 ) -> None:
-    """Per-node prep: apt upgrade, utilities, hostname, NVIDIA on GPU nodes.
+    """Per-node prep: authorize SSH key, apt upgrade, hostname, NVIDIA on GPU nodes.
 
     The host must already be in ansible/inventory.ini. Idempotent.
     """
     _require_ansible()
     _require_inventory()
+    _authorize_host_key(host)
     cmd = [
         "ansible-playbook",
         "-i", "inventory.ini",
