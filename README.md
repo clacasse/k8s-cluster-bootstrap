@@ -142,12 +142,7 @@ Run once per node. Pass the node's IP — the command prompts for a hostname and
 
 After each node is prepped, its hostname is set and registered in router DNS — you can SSH to it by name (e.g. `k3s-control`).
 
-Commit the inventory so it's tracked:
-```bash
-git add ansible/inventory.ini
-git commit -m "Add inventory"
-git push
-```
+> **Note:** `inventory.ini` contains real IPs and hostnames. It's gitignored by default. If your instance repo is public, keep it that way. If private, you can optionally track it with `git add -f ansible/inventory.ini`.
 
 ### 5. Bootstrap the cluster
 
