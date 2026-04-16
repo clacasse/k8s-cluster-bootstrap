@@ -570,6 +570,27 @@ def setup_slack(
         "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
     ])
     console.print(f"\n[green]Slack tokens configured. OpenClaw restarting.[/green]")
+    console.print(f"\nOnce someone messages the bot in Slack, approve them with:")
+    console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
+
+
+@app.command("approve-pairing")
+def approve_pairing(
+    channel: str = typer.Argument(..., help="Channel type (e.g. slack, telegram, whatsapp)."),
+    code: str = typer.Argument(..., help="Pairing code shown to the user."),
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Approve a user's pairing request for an OpenClaw channel."""
+    if control is None:
+        control = _get_control_host()
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw exec deploy/openclaw --"
+        f" openclaw pairing approve {channel} {code}",
+    ])
 
 
 def _ollama_url() -> str:

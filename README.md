@@ -262,6 +262,7 @@ Pure git workflow — no Ansible, no DNS:
 | `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
 | `models remove <tag>` | Delete a model from Ollama. |
 | `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
+| `approve-pairing <channel> <code>` | Approve a user's pairing request (e.g. `slack HPP2WU9B`). |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
 | `sync-upstream [--remote R] [--branch B]` | Fetch + merge upstream, re-apply placeholders. |
 
