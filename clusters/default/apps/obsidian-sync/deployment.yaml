@@ -45,7 +45,7 @@ spec:
             - name: vault
               mountPath: /vault
             - name: config
-              mountPath: /config
+              mountPath: /home/obsidian/.config
       volumes:
         - name: vault
           persistentVolumeClaim:
