@@ -31,7 +31,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 ANSIBLE_DIR = REPO_DIR / "ansible"
 CLUSTERS_DIR = REPO_DIR / "clusters"
 
-DEFAULT_APPS_DOMAIN = "apps.localdomain"
+DEFAULT_APPS_DOMAIN = "apps"
 VALID_ROLES = ("control", "worker", "gpu")
 
 INVENTORY_SKELETON = """\

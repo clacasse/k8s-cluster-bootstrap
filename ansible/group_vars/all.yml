@@ -11,8 +11,8 @@ cluster_name: "homelab"
 # Default timezone (override via -e timezone=...)
 timezone: "UTC"
 
-# LAN domain used for app Ingress hostnames (e.g. argocd.apps.localdomain).
+# LAN domain used for app Ingress hostnames (e.g. argocd.apps).
 # Must match your router's wildcard DNS record pointing *.{{ apps_domain }}
 # at the control node IP. Keep in sync with the APPS_DOMAIN replacement in
 # cluster manifests (rewritten by `cluster_manager.py init-fork`).
-apps_domain: "apps.localdomain"
+apps_domain: "apps"
