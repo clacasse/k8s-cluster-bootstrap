@@ -30,7 +30,8 @@ spec:
                     "token": "${GATEWAY_TOKEN}"
                   },
                   "controlUi": {
-                    "allowedOrigins": ["*"]
+                    "allowedOrigins": ["*"],
+                    "allowInsecureAuth": true
                   }
                 }
               }
