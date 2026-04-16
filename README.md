@@ -1,13 +1,13 @@
 # k8s Cluster Homelab
 
-Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create a private instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster running Ollama on the GPU, managed by Argo CD.
+Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster running Ollama on the GPU, managed by Argo CD.
 
 > **LAN-only by design.** Ollama's API has no authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
 
 ## What you get
 
 - **k3s** cluster: 1 server + N agents (no HA)
-- **Argo CD** on the control node, reconciling from your private instance repo via the app-of-apps pattern — at `http://argocd.apps.localdomain`
+- **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `http://argocd.apps.localdomain`
 - **Ollama** deployed to the GPU node with a persistent local-path PVC — at `http://ollama.apps.localdomain`
 - **NVIDIA device plugin** installed via Helm so pods can request `nvidia.com/gpu: 1`
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
@@ -17,16 +17,16 @@ Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes �
 
 This is a **public template repo**. It contains the generic infrastructure code — Ansible roles, CLI, and default app manifests with `REPO_URL` and `APPS_DOMAIN` placeholders. You don't modify this repo to deploy your cluster.
 
-Instead, you create a **private instance repo** from it. The `init-fork` command rewrites the placeholders with your private repo's URL and your LAN's domain. Argo CD reconciles from your private repo, so your cluster config, custom apps, and inventory stay private.
+Instead, you create your own **instance repo** from it. The `init-fork` command rewrites the placeholders with your repo's URL and your LAN's domain. Argo CD reconciles from your instance repo.
 
 ```
-k8s-cluster-homelab (public)          your-homelab (private)
+k8s-cluster-homelab (upstream)        your-homelab (instance)
 ├── ansible/                          ├── ansible/
 ├── scripts/cluster_manager.py        ├── scripts/cluster_manager.py
 ├── clusters/                         ├── clusters/
 │   repoURL: REPO_URL                 │   repoURL: https://github.com/you/your-homelab
 │   host: argocd.APPS_DOMAIN          │   host: argocd.apps.localdomain
-└── README.md                         ├── ansible/inventory.ini  (ungitignored)
+└── README.md                         ├── ansible/inventory.ini
                                       └── your custom apps...
 ```
 
@@ -90,13 +90,13 @@ If you use a different router, make the equivalent wildcard A record. If you wan
 
 All commands run on your workstation.
 
-### 1. Create your private instance repo
+### 1. Create your instance repo
 
 ```bash
-# Create a new private repo on GitHub (pick any name you like).
-gh repo create <you>/homelab --private
+# Create a new repo on GitHub (pick any name you like).
+gh repo create <you>/homelab
 
-# Clone this public template, then re-point origin at your private repo.
+# Clone this upstream template, then re-point origin at your instance repo.
 git clone https://github.com/<upstream-owner>/k8s-cluster-homelab.git homelab
 cd homelab
 git remote set-url origin git@github.com:<you>/homelab.git
@@ -116,7 +116,7 @@ In future sessions: `source .venv/bin/activate` before running the CLI.
 
 ### 3. Initialize placeholders
 
-This rewrites `REPO_URL` and `APPS_DOMAIN` in the cluster manifests to point at your private repo and your LAN domain.
+This rewrites `REPO_URL` and `APPS_DOMAIN` in the cluster manifests to point at your instance repo and your LAN domain.
 
 ```bash
 ./scripts/cluster_manager.py init-fork
@@ -132,7 +132,7 @@ cp ansible/inventory.ini.example ansible/inventory.ini
 $EDITOR ansible/inventory.ini
 ```
 
-Since this is your private repo, you can safely commit `inventory.ini`:
+Commit it to your instance repo so it's tracked:
 ```bash
 git add ansible/inventory.ini
 git commit -m "Add inventory"
@@ -163,24 +163,7 @@ Run once per host. Idempotent — safe to re-run anytime.
 ./scripts/cluster_manager.py bootstrap
 ```
 
-### 8. Configure Argo CD to access your private repo
-
-Since your instance repo is private, Argo CD needs credentials to pull from it. From the control node:
-
-```bash
-ssh k3s-control.localdomain
-
-# Create a GitHub personal access token (PAT) with `repo` scope at:
-#   https://github.com/settings/tokens
-# Then register it with Argo CD:
-sudo k3s kubectl -n argocd create secret generic repo-creds \
-  --from-literal=url=https://github.com/<you>/homelab.git \
-  --from-literal=username=<you> \
-  --from-literal=password=<your-pat>
-sudo k3s kubectl -n argocd label secret repo-creds argocd.argoproj.io/secret-type=repository
-```
-
-### 9. Verify
+### 8. Verify
 
 ```bash
 ./scripts/cluster_manager.py status
@@ -278,7 +261,7 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── inventory.ini.example           # committed template (public)
-│   ├── inventory.ini                   # your real inventory (private repo only)
+│   ├── inventory.ini                   # your real inventory (instance repo only)
 │   ├── prep.yml                        # per-node: base + nvidia
 │   ├── cluster.yml                     # cluster-wide: k3s + argocd
 │   ├── group_vars/all.yml              # pinned versions, apps_domain
@@ -320,13 +303,12 @@ Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 - **local-path PVCs don't survive OS reinstall.** Reinstalling the GPU node's OS means re-pulling models. By design — treat the OS as ephemeral.
 - **Ingress is plain HTTP.** No TLS on the LAN. Fine for a trusted network; add cert-manager if you need it.
 - **Ollama has no auth.** LAN only. See top-of-readme warning.
-- **Private repo requires Argo CD credentials.** See step 8 in the setup walkthrough. If the PAT expires, Argo CD will stop syncing — update the `repo-creds` secret.
 
 ## Key decisions
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Repo model | Public template + private instance | Generic upstream stays clean; cluster config stays private |
+| Repo model | Public template + instance repo | Generic upstream stays clean; instance holds your config |
 | Cluster topology | 1 server + N agents, no HA | Simple; rebuild on failure |
 | Control plane placement | Non-GPU node | Stable; GPU node can reboot freely |
 | GPU scheduling | Label + taint + toleration on `nvidia.com/gpu` | Matches NVIDIA GPU Operator convention |
