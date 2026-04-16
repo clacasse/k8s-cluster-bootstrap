@@ -140,4 +140,4 @@ spec:
             claimName: openclaw-data
         - name: vault
           persistentVolumeClaim:
-            claimName: nfs-workspace
+            claimName: obsidian-vault

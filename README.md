@@ -40,10 +40,10 @@ To pull upstream improvements into your instance later:
 
 ```
 ┌─────────────────────────┐  ┌─────────────────────────┐  ┌──────────────────────────┐
-│  control node           │  │  storage worker         │  │  gpu node                │
-│  (k3s server)           │  │  (k3s agent + NFS)      │  │  (k3s agent)             │
-│  stable, always-on      │  │  USB4 SSD, exports NFS  │  │  NVIDIA GPU; may reboot  │
-│                         │  │  workspace, models      │  │  labels: nvidia.com/gpu  │
+│  control node           │  │  worker node            │  │  gpu node                │
+│  (k3s server)           │  │  (k3s agent)            │  │  (k3s agent)             │
+│  stable, always-on      │  │  stable, always-on      │  │  NVIDIA GPU; may reboot  │
+│                         │  │                         │  │  labels: nvidia.com/gpu  │
 │                         │  │                         │  │  taints: nvidia.com/gpu  │
 └────────────┬────────────┘  └────────────┬────────────┘  └────────────┬─────────────┘
              │                            │                            │
@@ -51,8 +51,8 @@ To pull upstream improvements into your instance later:
                                     LAN (router DNS)
 
                    *.apps  →  control node IP  (wildcard A record)
-                   NFS shares mounted by pods + your Mac
                    AI workloads (Ollama) → GPU node
+                   Workspace synced via Obsidian Sync
 ```
 
 - **One server, no HA.** If it dies, rebuild from git.
@@ -216,21 +216,19 @@ Change it immediately after first login.
 
 Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens.
 
-### Mount the shared workspace on your Mac
+### Set up Obsidian Sync workspace (optional)
 
-The storage node exports NFS shares that OpenClaw uses as its workspace. Mount it on your Mac for direct file access:
+OpenClaw's workspace can be synced with your Obsidian vault via the official headless sync client. Edit notes on any device — they appear in the agent's workspace automatically.
 
 ```bash
-# Create a mount point
-mkdir -p ~/workspace
+# 1. Get your auth token (one-time, interactive — prompts for email/password/MFA)
+docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest
 
-# Mount (replace k3s-storage with your storage node's hostname)
-sudo mount -t nfs k3s-storage:/mnt/nas/workspace ~/workspace
+# 2. Configure the cluster with the token and vault name
+./scripts/cluster_manager.py setup-obsidian
 ```
 
-Or in Finder: **Go → Connect to Server → `nfs://k3s-storage/mnt/nas/workspace`**
-
-Files you drop in `~/workspace` are immediately visible to the OpenClaw agent, and files the agent writes appear on your Mac instantly — no sync delay.
+The sync pod runs continuously in the `openclaw` namespace, keeping the vault PVC in sync with Obsidian Sync. OpenClaw reads and writes to the same PVC as its workspace.
 
 ### Sync upstream improvements
 
@@ -273,6 +271,7 @@ Pure git workflow — no Ansible, no DNS:
 | `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
 | `models remove <tag>` | Delete a model from Ollama. |
 | `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
+| `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |
 | `approve-pairing <channel> <code>` | Approve a user's pairing request (e.g. `slack HPP2WU9B`). |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
 | `sync-upstream [--remote R] [--branch B]` | Fetch + merge upstream, re-apply placeholders. |
@@ -306,7 +305,6 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
 │   └── roles/
 │       ├── base/                       # apt, hostname, unattended-upgrades
 │       ├── nvidia/                     # GPU only; auto-reboots
-│       ├── storage/                    # NFS server on storage nodes
 │       ├── k3s-server/
 │       ├── k3s-agent/                  # GPU variant adds label/taint/containerd
 │       └── argocd/                     # installs Argo CD, applies root Application
@@ -317,13 +315,13 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │   └── children/               # reconciled by root
         │       ├── ollama.yaml
         │       ├── openclaw.yaml
-        │       ├── nfs-storage.yaml
+        │       ├── obsidian-sync.yaml
         │       ├── nvidia-device-plugin.yaml
         │       ├── node-feature-discovery.yaml
         │       └── argocd-ingress.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
-            ├── nfs-storage/            # NFS PVs for workspace + models
+            ├── obsidian-sync/          # Headless Obsidian Sync for workspace
             ├── ollama/
             └── openclaw/
 ```

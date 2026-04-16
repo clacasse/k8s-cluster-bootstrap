@@ -591,6 +591,62 @@ def setup_slack(
     console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
 
 
+@app.command("setup-obsidian")
+def setup_obsidian(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Configure Obsidian Sync for the workspace.
+
+    Prompts for your Obsidian auth token and vault name. The token is
+    obtained by running:
+      docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+
+    Stores the token in the cluster Secret and vault name in a ConfigMap,
+    then restarts the sync pod.
+    """
+    import base64
+
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+    console.print("First, get your auth token by running this on your workstation:")
+    console.print("  [cyan]docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest[/cyan]\n")
+
+    auth_token = typer.prompt("Obsidian auth token")
+    vault_name = typer.prompt("Obsidian vault name (exact match)")
+
+    # Patch the auth token into openclaw-secrets
+    token_b64 = base64.b64encode(auth_token.encode()).decode()
+    patch = f'{{"data":{{"obsidian-auth-token":"{token_b64}"}}}}'
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
+        f" --type merge -p '{patch}'",
+    ])
+
+    # Create or update the vault name ConfigMap
+    subprocess.run([
+        "ssh", control,
+        f"sudo k3s kubectl -n openclaw create configmap obsidian-config"
+        f" --from-literal=vault-name={vault_name}"
+        f" --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+    ])
+
+    # Restart the sync pod to pick up new config
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/obsidian-sync",
+    ], capture_output=True)
+
+    console.print(f"\n[green]Obsidian Sync configured for vault '{vault_name}'.[/green]")
+    console.print("The sync pod will start pulling your vault shortly.")
+
+
 @app.command("approve-pairing")
 def approve_pairing(
     channel: str = typer.Argument(..., help="Channel type (e.g. slack, telegram, whatsapp)."),

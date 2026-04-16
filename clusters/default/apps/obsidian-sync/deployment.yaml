@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: obsidian-sync
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: obsidian-sync
+  template:
+    metadata:
+      labels:
+        app: obsidian-sync
+    spec:
+      containers:
+        - name: obsidian-sync
+          image: ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+          env:
+            - name: OBSIDIAN_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: obsidian-auth-token
+            - name: VAULT_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: obsidian-config
+                  key: vault-name
+            - name: SYNC_MODE
+              value: bidirectional
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: vault
+              mountPath: /vault
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: vault
+          persistentVolumeClaim:
+            claimName: obsidian-vault
+        - name: config
+          persistentVolumeClaim:
+            claimName: obsidian-sync-config
