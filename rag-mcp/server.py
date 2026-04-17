@@ -156,13 +156,10 @@ if __name__ == "__main__":
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
 
-    # Build SSE transport manually to bypass DNS rebinding protection
     sse = SseServerTransport("/messages/")
 
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (read_stream, write_stream):
+    async def handle_sse(scope, receive, send):
+        async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
             await mcp._mcp_server.run(
                 read_stream, write_stream, mcp._mcp_server.create_initialization_options()
             )
