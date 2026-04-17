@@ -187,27 +187,10 @@ data:
           ]
         },
         {
-          "title": "Fan Speed",
-          "description": "RPM readings from hardware fan sensors. Empty if your system has passive cooling.",
-          "type": "timeseries",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": {
-            "defaults": { "unit": "rpm" },
-            "overrides": []
-          },
-          "targets": [
-            {
-              "expr": "node_hwmon_fan_rpm * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
-              "legendFormat": "{{nodename}} \u2014 {{sensor}}"
-            }
-          ]
-        },
-        {
           "title": "Uptime",
           "description": "Time since last boot.",
           "type": "stat",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "fieldConfig": {
             "defaults": { "unit": "dtdurations" },
