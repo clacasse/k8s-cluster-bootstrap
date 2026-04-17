@@ -158,15 +158,17 @@ if __name__ == "__main__":
 
     sse = SseServerTransport("/messages/")
 
-    async def handle_sse(scope, receive, send):
+    async def handle_sse_asgi(scope, receive, send):
         async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
             await mcp._mcp_server.run(
                 read_stream, write_stream, mcp._mcp_server.create_initialization_options()
             )
 
+    from starlette.routing import Mount, Route
+
     app = Starlette(
         routes=[
-            Route("/sse", endpoint=handle_sse),
+            Mount("/sse", app=handle_sse_asgi),
             Mount("/messages/", app=sse.handle_post_message),
         ],
     )
