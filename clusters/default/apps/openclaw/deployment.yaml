@@ -65,7 +65,7 @@ spec:
                 "mcp": {
                   "servers": {
                     "vault-search": {
-                      "url": "http://rag-mcp.openclaw.svc.cluster.local:8080",
+                      "url": "http://rag-mcp.openclaw.svc.cluster.local:8080/sse",
                       "transport": "sse"
                     }
                   }
