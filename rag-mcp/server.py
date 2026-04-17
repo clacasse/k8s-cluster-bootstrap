@@ -152,5 +152,25 @@ if __name__ == "__main__":
     log.info(f"Embed model: {EMBED_MODEL}")
     log.info(f"Vault: {VAULT_PATH}")
     import uvicorn
-    app = mcp.sse_app()
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+
+    # Build SSE transport manually to bypass DNS rebinding protection
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await mcp._mcp_server.run(
+                read_stream, write_stream, mcp._mcp_server.create_initialization_options()
+            )
+
+    app = Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
     uvicorn.run(app, host="0.0.0.0", port=8080)
