@@ -12,9 +12,26 @@ data:
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
       "links": [],
+      "templating": {
+        "list": [
+          {
+            "name": "node",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(DCGM_FI_DEV_GPU_TEMP, Hostname)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1,
+            "label": "GPU Node"
+          }
+        ]
+      },
       "panels": [
         {
           "title": "GPU Temperature",
+          "description": "Current GPU die temperature. Throttling typically starts at 83\u00b0C.",
           "type": "gauge",
           "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -36,13 +53,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_GPU_TEMP",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_GPU_TEMP{Hostname=~\"$node\"}",
+              "legendFormat": ""
             }
           ]
         },
         {
           "title": "GPU Utilization",
+          "description": "Percentage of time the GPU is executing work. 0% = idle, 100% = fully loaded.",
           "type": "gauge",
           "gridPos": { "h": 8, "w": 6, "x": 6, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -63,13 +81,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_GPU_UTIL",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_GPU_UTIL{Hostname=~\"$node\"}",
+              "legendFormat": ""
             }
           ]
         },
         {
           "title": "GPU Memory Used",
+          "description": "Video memory in use. When full, model loading fails or performance degrades.",
           "type": "gauge",
           "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -88,13 +107,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_FB_USED",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_FB_USED{Hostname=~\"$node\"}",
+              "legendFormat": ""
             }
           ]
         },
         {
           "title": "GPU Power Draw",
+          "description": "Current power consumption in watts.",
           "type": "gauge",
           "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -113,13 +133,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_POWER_USAGE",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_POWER_USAGE{Hostname=~\"$node\"}",
+              "legendFormat": ""
             }
           ]
         },
         {
-          "title": "GPU Temperature (history)",
+          "title": "Temperature History",
+          "description": "GPU die temperature over time. Sustained high temps reduce GPU lifespan.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -129,13 +150,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_GPU_TEMP",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_GPU_TEMP{Hostname=~\"$node\"}",
+              "legendFormat": "Temperature"
             }
           ]
         },
         {
-          "title": "GPU Utilization (history)",
+          "title": "Utilization History",
+          "description": "GPU compute utilization over time. Useful for spotting inference load patterns.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -145,13 +167,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_GPU_UTIL",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_GPU_UTIL{Hostname=~\"$node\"}",
+              "legendFormat": "Utilization"
             }
           ]
         },
         {
-          "title": "GPU Memory (history)",
+          "title": "Memory History",
+          "description": "GPU memory allocation over time. Shows how much VRAM your models consume.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -161,17 +184,18 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_FB_USED",
-              "legendFormat": "Used GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_FB_USED{Hostname=~\"$node\"}",
+              "legendFormat": "Used"
             },
             {
-              "expr": "DCGM_FI_DEV_FB_FREE",
-              "legendFormat": "Free GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_FB_FREE{Hostname=~\"$node\"}",
+              "legendFormat": "Free"
             }
           ]
         },
         {
-          "title": "GPU Power Draw (history)",
+          "title": "Power History",
+          "description": "GPU power consumption over time.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -181,13 +205,14 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_POWER_USAGE",
-              "legendFormat": "GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_POWER_USAGE{Hostname=~\"$node\"}",
+              "legendFormat": "Power"
             }
           ]
         },
         {
-          "title": "GPU SM Clock",
+          "title": "Clock Speeds",
+          "description": "Current GPU and memory clock speeds. Drops when idle, boosts under load.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -197,17 +222,18 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_SM_CLOCK * 1000000",
-              "legendFormat": "SM Clock GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_SM_CLOCK{Hostname=~\"$node\"} * 1000000",
+              "legendFormat": "SM Clock"
             },
             {
-              "expr": "DCGM_FI_DEV_MEM_CLOCK * 1000000",
-              "legendFormat": "Mem Clock GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_MEM_CLOCK{Hostname=~\"$node\"} * 1000000",
+              "legendFormat": "Memory Clock"
             }
           ]
         },
         {
-          "title": "GPU Encoder/Decoder Utilization",
+          "title": "Encoder / Decoder",
+          "description": "Hardware video encode/decode utilization. Only relevant for video workloads.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -217,19 +243,18 @@ data:
           },
           "targets": [
             {
-              "expr": "DCGM_FI_DEV_ENC_UTIL",
-              "legendFormat": "Encoder GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_ENC_UTIL{Hostname=~\"$node\"}",
+              "legendFormat": "Encoder"
             },
             {
-              "expr": "DCGM_FI_DEV_DEC_UTIL",
-              "legendFormat": "Decoder GPU {{gpu}}"
+              "expr": "DCGM_FI_DEV_DEC_UTIL{Hostname=~\"$node\"}",
+              "legendFormat": "Decoder"
             }
           ]
         }
       ],
       "schemaVersion": 39,
       "tags": ["gpu", "nvidia"],
-      "templating": { "list": [] },
       "time": { "from": "now-1h", "to": "now" },
       "title": "GPU Monitoring",
       "uid": "gpu-monitoring"

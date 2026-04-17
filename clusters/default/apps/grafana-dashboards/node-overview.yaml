@@ -12,9 +12,26 @@ data:
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
       "links": [],
+      "templating": {
+        "list": [
+          {
+            "name": "node",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(node_uname_info, nodename)",
+            "includeAll": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1,
+            "label": "Node"
+          }
+        ]
+      },
       "panels": [
         {
           "title": "CPU Usage",
+          "description": "Percentage of CPU time spent working (not idle), averaged across all cores.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -24,13 +41,14 @@ data:
           },
           "targets": [
             {
-              "expr": "1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
-              "legendFormat": "{{instance}}"
+              "expr": "(1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}}"
             }
           ]
         },
         {
           "title": "Memory Usage",
+          "description": "Percentage of total RAM in use (excluding cache and buffers).",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -40,13 +58,14 @@ data:
           },
           "targets": [
             {
-              "expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
-              "legendFormat": "{{instance}}"
+              "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}}"
             }
           ]
         },
         {
           "title": "CPU Temperature",
+          "description": "Hardware sensor readings in Celsius. Most CPUs throttle at 85\u2013100\u00b0C.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -56,13 +75,14 @@ data:
           },
           "targets": [
             {
-              "expr": "node_hwmon_temp_celsius",
-              "legendFormat": "{{instance}} {{chip}} {{sensor}}"
+              "expr": "node_hwmon_temp_celsius * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}} \u2014 {{chip}} {{sensor}}"
             }
           ]
         },
         {
           "title": "Disk Usage",
+          "description": "Root filesystem usage. Watch for >85% \u2014 low disk causes k8s pod evictions.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -72,13 +92,14 @@ data:
           },
           "targets": [
             {
-              "expr": "1 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"})",
-              "legendFormat": "{{instance}}"
+              "expr": "(1 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"})) * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}}"
             }
           ]
         },
         {
-          "title": "Network Traffic (bytes/sec)",
+          "title": "Network Traffic",
+          "description": "Bytes per second on physical interfaces. Excludes loopback and virtual k8s interfaces.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -88,17 +109,18 @@ data:
           },
           "targets": [
             {
-              "expr": "rate(node_network_receive_bytes_total{device!~\"lo|veth.*|cni.*|flannel.*\"}[5m])",
-              "legendFormat": "{{instance}} {{device}} rx"
+              "expr": "rate(node_network_receive_bytes_total{device!~\"lo|veth.*|cni.*|flannel.*|cali.*\"}[5m]) * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}} {{device}} \u2193"
             },
             {
-              "expr": "rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|cni.*|flannel.*\"}[5m])",
-              "legendFormat": "{{instance}} {{device}} tx"
+              "expr": "rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|cni.*|flannel.*|cali.*\"}[5m]) * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}} {{device}} \u2191"
             }
           ]
         },
         {
-          "title": "System Load (1m)",
+          "title": "System Load (1 min)",
+          "description": "1-minute load average. Values above your CPU core count indicate saturation.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -108,13 +130,14 @@ data:
           },
           "targets": [
             {
-              "expr": "node_load1",
-              "legendFormat": "{{instance}}"
+              "expr": "node_load1 * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}}"
             }
           ]
         },
         {
           "title": "Fan Speed",
+          "description": "RPM readings from hardware fan sensors. Empty if your system has passive cooling.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -124,31 +147,31 @@ data:
           },
           "targets": [
             {
-              "expr": "node_hwmon_fan_rpm",
-              "legendFormat": "{{instance}} {{chip}} {{sensor}}"
+              "expr": "node_hwmon_fan_rpm * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}} \u2014 {{sensor}}"
             }
           ]
         },
         {
           "title": "Uptime",
+          "description": "Time since last boot.",
           "type": "stat",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "fieldConfig": {
-            "defaults": { "unit": "s" },
+            "defaults": { "unit": "dtdurations" },
             "overrides": []
           },
           "targets": [
             {
-              "expr": "time() - node_boot_time_seconds",
-              "legendFormat": "{{instance}}"
+              "expr": "time() - node_boot_time_seconds * on(instance) group_left(nodename) node_uname_info{nodename=~\"$node\"}",
+              "legendFormat": "{{nodename}}"
             }
           ]
         }
       ],
       "schemaVersion": 39,
       "tags": ["nodes", "hardware"],
-      "templating": { "list": [] },
       "time": { "from": "now-1h", "to": "now" },
       "title": "Node Overview",
       "uid": "node-overview"
