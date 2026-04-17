@@ -1,6 +1,5 @@
 """MCP server exposing RAG search over the indexed vault."""
 
-import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -9,6 +8,7 @@ from pathlib import Path
 import chromadb
 import requests
 from mcp.server.fastmcp import FastMCP
+from mcp.server.sse import SseServerTransport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("rag-mcp")
@@ -132,7 +132,6 @@ def read_note(path: str) -> str:
     if not full_path.is_file():
         return f"Not a file: {path}"
 
-    # Security: ensure the path doesn't escape the vault
     try:
         full_path.resolve().relative_to(VAULT_PATH.resolve())
     except ValueError:
@@ -151,24 +150,28 @@ if __name__ == "__main__":
     log.info(f"Ollama: {OLLAMA_URL}")
     log.info(f"Embed model: {EMBED_MODEL}")
     log.info(f"Vault: {VAULT_PATH}")
+
     import uvicorn
-    from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
+    from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    sse = SseServerTransport("/messages/")
+    from mcp.server.transport_security import TransportSecuritySettings
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    sse = SseServerTransport("/messages/", transport_security=security)
 
-    async def handle_sse_asgi(scope, receive, send):
-        async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send  # type: ignore[attr-defined]
+        ) as (read_stream, write_stream):
             await mcp._mcp_server.run(
                 read_stream, write_stream, mcp._mcp_server.create_initialization_options()
             )
-
-    from starlette.routing import Mount, Route
+        return Response()
 
     app = Starlette(
         routes=[
-            Mount("/sse", app=handle_sse_asgi),
+            Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
     )
