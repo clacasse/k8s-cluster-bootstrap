@@ -26,7 +26,7 @@ spec:
             - name: CHROMADB_URL
               value: http://chromadb.openclaw.svc.cluster.local:8000
             - name: OLLAMA_URL
-              value: http://ollama.ollama.svc.cluster.local:11434
+              value: http://ollama-metrics.ollama.svc.cluster.local:11434
             - name: EMBED_MODEL
               value: nomic-embed-text
             - name: VAULT_PATH

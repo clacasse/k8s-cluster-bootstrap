@@ -38,7 +38,7 @@ spec:
                 "models": {
                   "providers": {
                     "ollama": {
-                      "baseUrl": "http://ollama.ollama.svc.cluster.local:11434",
+                      "baseUrl": "http://ollama-metrics.ollama.svc.cluster.local:11434",
                       "api": "ollama",
                       "models": [
                         {
@@ -105,7 +105,7 @@ spec:
             - name: OLLAMA_API_KEY
               value: ollama-local  # placeholder — Ollama has no real auth; this just enables the provider
             - name: OLLAMA_BASE_URL
-              value: http://ollama.ollama.svc.cluster.local:11434
+              value: http://ollama-metrics.ollama.svc.cluster.local:11434
             - name: OPENCLAW_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:

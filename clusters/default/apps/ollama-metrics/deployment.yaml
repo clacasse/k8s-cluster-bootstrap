@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama-metrics
+  template:
+    metadata:
+      labels:
+        app: ollama-metrics
+    spec:
+      containers:
+        - name: ollama-metrics
+          image: ghcr.io/norskhelsenett/ollama-metrics:latest
+          ports:
+            - name: proxy
+              containerPort: 8080
+          env:
+            - name: OLLAMA_HOST
+              value: http://ollama.ollama.svc.cluster.local:11434
+            - name: PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

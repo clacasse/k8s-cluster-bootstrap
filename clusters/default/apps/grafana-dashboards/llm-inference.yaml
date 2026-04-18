@@ -1,0 +1,157 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-llm-inference
+  labels:
+    grafana_dashboard: "1"
+data:
+  llm-inference.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "graphTooltip": 1,
+      "panels": [
+        {
+          "title": "Tokens Per Second (generation)",
+          "description": "How fast the model generates output tokens. Higher is better.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(ollama_generated_tokens_total[5m])",
+              "legendFormat": "Generated tokens/sec"
+            }
+          ]
+        },
+        {
+          "title": "Tokens Per Second (prompt)",
+          "description": "How fast the model processes input/prompt tokens.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(ollama_prompt_tokens_total[5m])",
+              "legendFormat": "Prompt tokens/sec"
+            }
+          ]
+        },
+        {
+          "title": "Request Duration",
+          "description": "How long each inference request takes end-to-end.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "s" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(ollama_request_duration_seconds_sum[5m]) / rate(ollama_request_duration_seconds_count[5m])",
+              "legendFormat": "Avg duration"
+            }
+          ]
+        },
+        {
+          "title": "Requests Per Minute",
+          "description": "Rate of inference requests hitting the model.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "reqpm" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(ollama_request_duration_seconds_count[5m]) * 60",
+              "legendFormat": "Requests/min"
+            }
+          ]
+        },
+        {
+          "title": "Total Tokens Generated",
+          "description": "Cumulative output tokens generated since last restart.",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "ollama_generated_tokens_total",
+              "legendFormat": "Generated"
+            }
+          ]
+        },
+        {
+          "title": "Total Prompt Tokens",
+          "description": "Cumulative input tokens processed since last restart.",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "ollama_prompt_tokens_total",
+              "legendFormat": "Prompt"
+            }
+          ]
+        },
+        {
+          "title": "Total Requests",
+          "description": "Total inference requests since last restart.",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "ollama_request_duration_seconds_count",
+              "legendFormat": "Requests"
+            }
+          ]
+        },
+        {
+          "title": "Avg Time Per Token",
+          "description": "Average time to generate one output token.",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "ms" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(ollama_request_duration_seconds_sum[5m]) / rate(ollama_generated_tokens_total[5m]) * 1000",
+              "legendFormat": "ms/token"
+            }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["llm", "ollama", "inference"],
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" },
+      "title": "LLM Inference",
+      "uid": "llm-inference"
+    }
