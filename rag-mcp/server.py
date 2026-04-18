@@ -181,7 +181,7 @@ if __name__ == "__main__":
     log.info(f"Vault: {VAULT_PATH}")
 
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    sse = SseServerTransport("/messages/", transport_security=security)
+    sse = SseServerTransport("/messages/", security_settings=security)
 
     async def handle_sse(request):
         async with sse.connect_sse(
