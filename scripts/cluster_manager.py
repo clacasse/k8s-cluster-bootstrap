@@ -663,6 +663,35 @@ def setup_slack(
     console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
 
 
+@app.command("remove-slack")
+def remove_slack(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Remove Slack integration from OpenClaw.
+
+    Deletes the Slack tokens from the cluster Secret and restarts OpenClaw.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+
+    _ssh_cmd(control,
+        "sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
+        " | python3 -c \"import sys,json; d=json.load(sys.stdin); [d['data'].pop(k,None) for k in ['slack-bot-token','slack-app-token']]; json.dump(d,sys.stdout)\""
+        " | sudo k3s kubectl apply -f -"
+    )
+
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
+    ])
+    console.print(f"[green]Slack tokens removed. OpenClaw restarting.[/green]")
+
+
 @app.command("setup-telegram")
 def setup_telegram(
     control: str = typer.Option(
@@ -701,6 +730,35 @@ def setup_telegram(
     console.print(f"\n[green]Telegram bot configured. OpenClaw restarting.[/green]")
     console.print(f"\nOnce someone messages the bot on Telegram, approve them with:")
     console.print(f"  ./scripts/cluster_manager.py approve-pairing telegram <CODE>")
+
+
+@app.command("remove-telegram")
+def remove_telegram(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Remove Telegram integration from OpenClaw.
+
+    Deletes the Telegram token from the cluster Secret and restarts OpenClaw.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+
+    _ssh_cmd(control,
+        "sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
+        " | python3 -c \"import sys,json; d=json.load(sys.stdin); d['data'].pop('telegram-bot-token',None); json.dump(d,sys.stdout)\""
+        " | sudo k3s kubectl apply -f -"
+    )
+
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
+    ])
+    console.print(f"[green]Telegram token removed. OpenClaw restarting.[/green]")
 
 
 @app.command("setup-obsidian")
