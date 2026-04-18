@@ -10,7 +10,7 @@ spec:
   source:
     repoURL: https://nvidia.github.io/dcgm-exporter/helm-charts
     chart: dcgm-exporter
-    targetRevision: 4.0.4
+    targetRevision: 4.4.1
     helm:
       releaseName: dcgm-exporter
       values: |

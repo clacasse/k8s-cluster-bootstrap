@@ -1,5 +1,5 @@
 mcp>=1.27.0
-chromadb==0.6.3
-requests>=2.31
-uvicorn>=0.30
-starlette>=0.36
+chromadb==1.5.8
+requests>=2.33
+uvicorn>=0.44
+starlette>=1.0

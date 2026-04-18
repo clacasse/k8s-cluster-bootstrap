@@ -1,8 +1,8 @@
 ---
 # Pinned versions. Bump deliberately.
-k3s_version: "v1.32.3+k3s1"
-argocd_version: "v2.14.3"
-nvidia_device_plugin_chart_version: "0.17.0"
+k3s_version: "v1.35.3+k3s1"
+argocd_version: "v3.0.23"
+nvidia_device_plugin_chart_version: "0.17.4"
 nfd_chart_version: "0.18.3"
 ollama_image: "ollama/ollama:0.20.7"
 openclaw_image: "ghcr.io/openclaw/openclaw:2026.4.14"

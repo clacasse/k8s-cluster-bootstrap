@@ -336,14 +336,16 @@ All pinned in `ansible/group_vars/all.yml`:
 
 | Component | Version |
 |---|---|
-| k3s | `v1.32.3+k3s1` |
-| Argo CD | `v2.14.3` |
+| k3s | `v1.35.3+k3s1` |
+| Argo CD | `v3.0.23` |
 | Ollama | `0.20.7` |
 | OpenClaw | `2026.4.14` |
-| NVIDIA device plugin Helm chart | `0.17.0` |
+| ChromaDB | `1.5.8` |
+| NVIDIA device plugin Helm chart | `0.17.4` |
 | Node Feature Discovery Helm chart | `0.18.3` |
 | kube-prometheus-stack Helm chart | `83.6.0` |
-| DCGM Exporter Helm chart | `4.0.4` |
+| Prometheus Operator CRDs Helm chart | `28.0.1` |
+| DCGM Exporter Helm chart | `4.4.1` |
 
 Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 

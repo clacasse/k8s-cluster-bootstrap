@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: chromadb
-          image: chromadb/chroma:0.6.3
+          image: chromadb/chroma:1.5.8
           ports:
             - name: http
               containerPort: 8000
