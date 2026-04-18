@@ -663,6 +663,46 @@ def setup_slack(
     console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
 
 
+@app.command("setup-telegram")
+def setup_telegram(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Configure Telegram integration for OpenClaw.
+
+    Prompts for the Telegram Bot Token (from @BotFather). Stores it in
+    the cluster Secret and restarts the OpenClaw pod.
+    """
+    import base64
+
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+    console.print("Get your bot token from @BotFather on Telegram\n")
+
+    bot_token = typer.prompt("Telegram Bot Token")
+
+    # Patch the token into openclaw-secrets
+    token_b64 = base64.b64encode(bot_token.encode()).decode()
+    patch = f'{{"data":{{"telegram-token":"{token_b64}"}}}}'
+    _ssh_cmd(control,
+        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
+        f" --type merge -p {_q(patch)}"
+    )
+
+    # Restart OpenClaw
+    subprocess.run([
+        "ssh", control,
+        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
+    ])
+    console.print(f"\n[green]Telegram bot configured. OpenClaw restarting.[/green]")
+    console.print(f"\nOnce someone messages the bot on Telegram, approve them with:")
+    console.print(f"  ./scripts/cluster_manager.py approve-pairing telegram <CODE>")
+
+
 @app.command("setup-obsidian")
 def setup_obsidian(
     control: str = typer.Option(

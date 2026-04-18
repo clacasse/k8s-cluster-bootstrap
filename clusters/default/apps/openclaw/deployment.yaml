@@ -123,6 +123,12 @@ spec:
                   name: openclaw-secrets
                   key: slack-app-token
                   optional: true
+            - name: TELEGRAM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: telegram-token
+                  optional: true
           readinessProbe:
             httpGet:
               path: /readyz

@@ -213,6 +213,7 @@ Change it immediately after first login.
 
 ```bash
 ./scripts/cluster_manager.py setup-slack
+| `setup-telegram` | Configure Telegram bot token for OpenClaw. |
 ```
 
 Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens.
@@ -272,6 +273,7 @@ Pure git workflow — no Ansible, no DNS:
 | `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
 | `models remove <tag>` | Delete a model from Ollama. |
 | `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
+| `setup-telegram` | Configure Telegram bot token for OpenClaw. |
 | `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |
 | `approve-pairing <channel> <code>` | Approve a user's pairing request (e.g. `slack HPP2WU9B`). |
 | `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
