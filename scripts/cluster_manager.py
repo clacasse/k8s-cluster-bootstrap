@@ -687,7 +687,7 @@ def setup_telegram(
 
     # Patch the token into openclaw-secrets
     token_b64 = base64.b64encode(bot_token.encode()).decode()
-    patch = f'{{"data":{{"telegram-token":"{token_b64}"}}}}'
+    patch = f'{{"data":{{"telegram-bot-token":"{token_b64}"}}}}'
     _ssh_cmd(control,
         f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
         f" --type merge -p {_q(patch)}"
