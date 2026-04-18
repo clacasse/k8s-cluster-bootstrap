@@ -15,6 +15,8 @@ Runs from your workstation. Shells out to ansible-playbook for prep/bootstrap.
 
 from __future__ import annotations
 
+import base64
+import functools
 import re
 import shlex
 import subprocess
@@ -62,19 +64,65 @@ app = typer.Typer(add_completion=False, help=__doc__, no_args_is_help=True)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ssh_cmd(control: str, cmd: str) -> subprocess.CompletedProcess:
-    """Run a shell command on the control node via SSH. Quotes are the caller's responsibility."""
-    return subprocess.run(["ssh", control, cmd])
+def _ssh(control: str, cmd: str, *, capture: bool = False, check: bool = False) -> subprocess.CompletedProcess:
+    """Run a shell command on the control node via SSH."""
+    return subprocess.run(["ssh", control, cmd], capture_output=capture, text=capture, check=check)
 
 
-def _ssh_cmd_capture(control: str, cmd: str) -> subprocess.CompletedProcess:
-    """Run a shell command on the control node via SSH, capturing output."""
-    return subprocess.run(["ssh", control, cmd], capture_output=True, text=True)
+def _kubectl(control: str, *args: str, capture: bool = False, check: bool = False) -> subprocess.CompletedProcess:
+    """Run kubectl on the control node via SSH (list args, no shell injection risk)."""
+    return subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl", *args],
+        capture_output=capture, text=capture, check=check,
+    )
+
+
+def _kubectl_exists(control: str, namespace: str, resource_type: str, name: str) -> bool:
+    """Check if a k8s resource exists."""
+    result = _kubectl(control, "-n", namespace, "get", resource_type, name,
+                      "--ignore-not-found", "-o", "name", capture=True)
+    return bool(result.stdout.strip())
+
+
+def _ensure_namespace(control: str, namespace: str) -> None:
+    """Create a namespace idempotently."""
+    _ssh(control,
+        f"sudo k3s kubectl create namespace {_q(namespace)} --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+        capture=True,
+    )
+
+
+def _patch_secret(control: str, namespace: str, name: str, data: dict[str, str]) -> None:
+    """Patch a k8s Secret with base64-encoded key/value pairs. Use None values to delete keys."""
+    encoded = {}
+    for k, v in data.items():
+        if v is None:
+            encoded[k] = None
+        else:
+            encoded[k] = base64.b64encode(v.encode()).decode()
+
+    import json
+    patch = json.dumps({"data": encoded})
+    _ssh(control,
+        f"sudo k3s kubectl -n {_q(namespace)} patch secret {_q(name)}"
+        f" --type merge -p {_q(patch)}"
+    )
+
+
+def _restart_deployment(control: str, namespace: str, name: str) -> None:
+    """Restart a deployment via rollout restart."""
+    _kubectl(control, "-n", namespace, "rollout", "restart", f"deployment/{name}")
 
 
 def _q(s: str) -> str:
     """Shell-quote a string for safe interpolation into SSH commands."""
     return shlex.quote(s)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_apps_domain_cached() -> str:
+    return _get_apps_domain()
 
 
 def _run(cmd: list[str], cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
@@ -489,12 +537,7 @@ def setup_secrets(
     console.print(f"[dim]via {control}[/dim]\n")
 
     # --- Wildcard TLS cert for *.apps_domain ---
-    result = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "kube-system",
-         "get", "secret", "wildcard-apps-tls", "--ignore-not-found", "-o", "name"],
-        capture_output=True, text=True,
-    )
-    if result.stdout.strip():
+    if _kubectl_exists(control, "kube-system", "secret", "wildcard-apps-tls"):
         console.print(f"[dim]wildcard-apps-tls already exists, skipping.[/dim]")
     else:
         console.print(f"Generating wildcard TLS cert for [cyan]*.{apps_domain}[/cyan]...")
@@ -511,65 +554,41 @@ def setup_secrets(
             ], check=True, capture_output=True)
 
             # Copy to control node in a secure temp dir and create secret
-            subprocess.run(["ssh", control, "mkdir -p -m 700 /tmp/tls-setup"],
-                          check=True, capture_output=True)
+            _ssh(control, "mkdir -p -m 700 /tmp/tls-setup", check=True, capture=True)
             subprocess.run(["scp", str(key_path), str(cert_path),
                            f"{control}:/tmp/tls-setup/"], check=True, capture_output=True)
-            subprocess.run([
-                "ssh", control,
+            _ssh(control,
                 "sudo k3s kubectl -n kube-system create secret tls wildcard-apps-tls"
                 " --cert=/tmp/tls-setup/tls.crt --key=/tmp/tls-setup/tls.key"
                 " ; rm -rf /tmp/tls-setup",
-            ], check=True)
+                check=True,
+            )
         console.print(f"[green]Wildcard TLS cert created in kube-system/wildcard-apps-tls.[/green]")
         console.print(f"[yellow]This is a self-signed cert — your browser will show a warning on first visit.[/yellow]\n")
 
     # --- OpenClaw gateway token ---
-    result = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
-         "get", "secret", "openclaw-secrets", "--ignore-not-found", "-o", "name"],
-        capture_output=True, text=True,
-    )
-    if result.stdout.strip():
+    if _kubectl_exists(control, "openclaw", "secret", "openclaw-secrets"):
         console.print("[dim]openclaw-secrets already exists, skipping.[/dim]")
     else:
         token = secrets_mod.token_urlsafe(32)
-        subprocess.run([
-            "ssh", control,
-            "sudo k3s kubectl create namespace openclaw --dry-run=client -o yaml"
-            " | sudo k3s kubectl apply -f -",
-        ], capture_output=True)
-        _ssh_cmd(control,
-            f"sudo k3s kubectl -n openclaw create secret generic openclaw-secrets"
-            f" --from-literal=gateway-token={_q(token)}"
-        )
+        _ensure_namespace(control, "openclaw")
+        _kubectl(control, "-n", "openclaw", "create", "secret", "generic", "openclaw-secrets",
+                 f"--from-literal=gateway-token={token}")
         console.print(f"\n[green]OpenClaw gateway token created.[/green]")
         console.print(f"[bold]Save this token — you'll need it to log into the OpenClaw web UI:[/bold]")
         console.print(f"\n  [cyan]{token}[/cyan]\n")
 
     # --- OpenClaw active model ConfigMap ---
-    result = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
-         "get", "configmap", "openclaw-model", "--ignore-not-found", "-o", "name"],
-        capture_output=True, text=True,
-    )
-    if result.stdout.strip():
+    if _kubectl_exists(control, "openclaw", "configmap", "openclaw-model"):
         console.print("[dim]openclaw-model ConfigMap already exists, skipping.[/dim]")
     else:
         model = typer.prompt("Default model for OpenClaw (e.g. gemma4:26b)")
-        _ssh_cmd(control,
-            f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
-            f" --from-literal=active-model={_q(model)}"
-        )
+        _kubectl(control, "-n", "openclaw", "create", "configmap", "openclaw-model",
+                 f"--from-literal=active-model={model}")
         console.print(f"[green]Active model set to {model}.[/green]")
 
     # --- OpenClaw config ConfigMap ---
-    result = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
-         "get", "configmap", "openclaw-config", "--ignore-not-found", "-o", "name"],
-        capture_output=True, text=True,
-    )
-    if result.stdout.strip():
+    if _kubectl_exists(control, "openclaw", "configmap", "openclaw-config"):
         console.print("[dim]openclaw-config ConfigMap already exists, skipping.[/dim]")
     else:
         disable_device_auth = typer.confirm(
@@ -577,32 +596,19 @@ def setup_secrets(
             default=True,
         )
         auth_value = "true" if disable_device_auth else "false"
-        _ssh_cmd(control,
-            f"sudo k3s kubectl -n openclaw create configmap openclaw-config"
-            f" --from-literal=disable-device-auth={_q(auth_value)}"
-        )
+        _kubectl(control, "-n", "openclaw", "create", "configmap", "openclaw-config",
+                 f"--from-literal=disable-device-auth={auth_value}")
         console.print(f"[green]OpenClaw config created (disable-device-auth={auth_value}).[/green]")
 
     # --- Grafana admin secret ---
-    result = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "monitoring",
-         "get", "secret", "grafana-admin", "--ignore-not-found", "-o", "name"],
-        capture_output=True, text=True,
-    )
-    if result.stdout.strip():
+    if _kubectl_exists(control, "monitoring", "secret", "grafana-admin"):
         console.print("[dim]grafana-admin secret already exists, skipping.[/dim]")
     else:
         grafana_password = secrets_mod.token_urlsafe(24)
-        subprocess.run([
-            "ssh", control,
-            "sudo k3s kubectl create namespace monitoring --dry-run=client -o yaml"
-            " | sudo k3s kubectl apply -f -",
-        ], capture_output=True)
-        _ssh_cmd(control,
-            f"sudo k3s kubectl -n monitoring create secret generic grafana-admin"
-            f" --from-literal=admin-user=admin"
-            f" --from-literal=admin-password={_q(grafana_password)}"
-        )
+        _ensure_namespace(control, "monitoring")
+        _kubectl(control, "-n", "monitoring", "create", "secret", "generic", "grafana-admin",
+                 f"--from-literal=admin-user=admin",
+                 f"--from-literal=admin-password={grafana_password}")
         console.print(f"\n[green]Grafana admin password created.[/green]")
         console.print(f"[bold]Save this — login at https://grafana.apps with user 'admin':[/bold]")
         console.print(f"\n  [cyan]{grafana_password}[/cyan]\n")
@@ -635,29 +641,11 @@ def setup_slack(
     if not app_token.startswith("xapp-"):
         console.print("[yellow]Warning: App token usually starts with xapp-[/yellow]")
 
-    # Patch the existing secret with Slack tokens
-    subprocess.run([
-        "ssh", control,
-        f"sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
-        f" | sudo k3s kubectl apply -f - --dry-run=client -o yaml"
-        f" | sudo k3s kubectl apply -f -",
-    ], capture_output=True)
-
-    # Use kubectl patch to add the new keys
-    import base64
-    bot_b64 = base64.b64encode(bot_token.encode()).decode()
-    app_b64 = base64.b64encode(app_token.encode()).decode()
-    patch = f'{{"data":{{"slack-bot-token":"{bot_b64}","slack-app-token":"{app_b64}"}}}}'
-    _ssh_cmd(control,
-        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
-        f" --type merge -p {_q(patch)}"
-    )
-
-    # Restart OpenClaw to pick up new env vars
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
-    ])
+    _patch_secret(control, "openclaw", "openclaw-secrets", {
+        "slack-bot-token": bot_token,
+        "slack-app-token": app_token,
+    })
+    _restart_deployment(control, "openclaw", "openclaw")
     console.print(f"\n[green]Slack tokens configured. OpenClaw restarting.[/green]")
     console.print(f"\nOnce someone messages the bot in Slack, approve them with:")
     console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
@@ -682,16 +670,11 @@ def remove_slack(
 
     console.print(f"[dim]via {control}[/dim]\n")
 
-    _ssh_cmd(control,
-        "sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
-        " | python3 -c \"import sys,json; d=json.load(sys.stdin); [d['data'].pop(k,None) for k in ['slack-bot-token','slack-app-token']]; json.dump(d,sys.stdout)\""
-        " | sudo k3s kubectl apply -f -"
-    )
-
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
-    ])
+    _patch_secret(control, "openclaw", "openclaw-secrets", {
+        "slack-bot-token": None,
+        "slack-app-token": None,
+    })
+    _restart_deployment(control, "openclaw", "openclaw")
     console.print(f"[green]Slack tokens removed. OpenClaw restarting.[/green]")
 
 
@@ -707,7 +690,6 @@ def setup_telegram(
     Prompts for the Telegram Bot Token (from @BotFather). Stores it in
     the cluster Secret and restarts the OpenClaw pod.
     """
-    import base64
 
     if control is None:
         control = _get_control_host()
@@ -717,19 +699,10 @@ def setup_telegram(
 
     bot_token = typer.prompt("Telegram Bot Token")
 
-    # Patch the token into openclaw-secrets
-    token_b64 = base64.b64encode(bot_token.encode()).decode()
-    patch = f'{{"data":{{"telegram-bot-token":"{token_b64}"}}}}'
-    _ssh_cmd(control,
-        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
-        f" --type merge -p {_q(patch)}"
-    )
-
-    # Restart OpenClaw
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
-    ])
+    _patch_secret(control, "openclaw", "openclaw-secrets", {
+        "telegram-bot-token": bot_token,
+    })
+    _restart_deployment(control, "openclaw", "openclaw")
     console.print(f"\n[green]Telegram bot configured. OpenClaw restarting.[/green]")
     console.print(f"\nOnce someone messages the bot on Telegram, approve them with:")
     console.print(f"  ./scripts/cluster_manager.py approve-pairing telegram <CODE>")
@@ -754,16 +727,10 @@ def remove_telegram(
 
     console.print(f"[dim]via {control}[/dim]\n")
 
-    _ssh_cmd(control,
-        "sudo k3s kubectl -n openclaw get secret openclaw-secrets -o json"
-        " | python3 -c \"import sys,json; d=json.load(sys.stdin); d['data'].pop('telegram-bot-token',None); json.dump(d,sys.stdout)\""
-        " | sudo k3s kubectl apply -f -"
-    )
-
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
-    ])
+    _patch_secret(control, "openclaw", "openclaw-secrets", {
+        "telegram-bot-token": None,
+    })
+    _restart_deployment(control, "openclaw", "openclaw")
     console.print(f"[green]Telegram token removed. OpenClaw restarting.[/green]")
 
 
@@ -783,7 +750,6 @@ def setup_obsidian(
     Stores the token in the cluster Secret and vault name in a ConfigMap,
     then restarts the sync pod.
     """
-    import base64
 
     if control is None:
         control = _get_control_host()
@@ -795,27 +761,19 @@ def setup_obsidian(
     auth_token = typer.prompt("Obsidian auth token")
     vault_name = typer.prompt("Obsidian vault name (exact match)")
 
-    # Patch the auth token into openclaw-secrets
-    token_b64 = base64.b64encode(auth_token.encode()).decode()
-    patch = f'{{"data":{{"obsidian-auth-token":"{token_b64}"}}}}'
-    _ssh_cmd(control,
-        f"sudo k3s kubectl -n openclaw patch secret openclaw-secrets"
-        f" --type merge -p {_q(patch)}"
-    )
+    _patch_secret(control, "openclaw", "openclaw-secrets", {
+        "obsidian-auth-token": auth_token,
+    })
 
     # Create or update the vault name ConfigMap
-    _ssh_cmd(control,
+    _ssh(control,
         f"sudo k3s kubectl -n openclaw create configmap obsidian-config"
         f" --from-literal=vault-name={_q(vault_name)}"
         f" --dry-run=client -o yaml"
         f" | sudo k3s kubectl apply -f -"
     )
 
-    # Restart the sync pod to pick up new config
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/obsidian-sync",
-    ], capture_output=True)
+    _restart_deployment(control, "openclaw", "obsidian-sync")
 
     console.print(f"\n[green]Obsidian Sync configured for vault '{vault_name}'.[/green]")
     console.print("The sync pod will start pulling your vault shortly.")
@@ -833,23 +791,15 @@ def approve_pairing(
     """Approve a user's pairing request for an OpenClaw channel."""
     if control is None:
         control = _get_control_host()
-    subprocess.run([
-        "ssh", control,
+    _ssh(control,
         f"sudo k3s kubectl -n openclaw exec deploy/openclaw --"
-        f" openclaw pairing approve {_q(channel)} {_q(code)}",
-    ])
+        f" openclaw pairing approve {_q(channel)} {_q(code)}"
+    )
 
 
 def _ollama_url() -> str:
     apps_domain = _get_apps_domain()
     return f"https://ollama.{apps_domain}"
-
-
-def _kubectl_ssh(control: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", *args],
-        capture_output=capture, text=capture,
-    )
 
 
 models_app = typer.Typer(name="models", help="Manage Ollama models and OpenClaw model selection.", no_args_is_help=True)
@@ -880,11 +830,10 @@ def models_list() -> None:
 
     # Show active model
     control = _get_control_host()
-    active = subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", "-n", "openclaw",
-         "get", "configmap", "openclaw-model", "-o", "jsonpath={.data.active-model}",
-         "--ignore-not-found"],
-        capture_output=True, text=True,
+    active = _kubectl(control, "-n", "openclaw",
+        "get", "configmap", "openclaw-model",
+        "-o", "jsonpath={.data.active-model}",
+        "--ignore-not-found", capture=True,
     ).stdout.strip()
 
     for m in models:
@@ -917,18 +866,13 @@ def models_set(
     control = _get_control_host()
 
     console.print(f"Setting active model to [cyan]{model}[/cyan]")
-    _ssh_cmd(control,
+    _ssh(control,
         f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
         f" --from-literal=active-model={_q(model)}"
         f" --dry-run=client -o yaml"
         f" | sudo k3s kubectl apply -f -"
     )
-
-    # Restart OpenClaw to pick up the new model
-    subprocess.run([
-        "ssh", control,
-        "sudo k3s kubectl -n openclaw rollout restart deployment/openclaw",
-    ])
+    _restart_deployment(control, "openclaw", "openclaw")
     console.print(f"[green]Active model set to {model}. OpenClaw restarting.[/green]")
 
 
@@ -972,13 +916,12 @@ def restart(
 
     if wipe_rag:
         console.print("Wiping ChromaDB data...")
-        _ssh_cmd(control, "sudo k3s kubectl -n openclaw scale deployment/chromadb --replicas=0")
-        _ssh_cmd(control, "sudo k3s kubectl -n openclaw delete pvc chromadb-data --ignore-not-found")
-        _ssh_cmd(control, "sudo k3s kubectl -n openclaw scale deployment/chromadb --replicas=1")
+        _kubectl(control, "-n", "openclaw", "scale", "deployment/chromadb", "--replicas=0")
+        _kubectl(control, "-n", "openclaw", "delete", "pvc", "chromadb-data", "--ignore-not-found")
+        _kubectl(control, "-n", "openclaw", "scale", "deployment/chromadb", "--replicas=1")
         console.print("Waiting for ChromaDB to recreate...")
-        _ssh_cmd(control,
-            "sudo k3s kubectl -n openclaw wait --for=condition=Ready pod -l app=chromadb --timeout=120s"
-        )
+        _kubectl(control, "-n", "openclaw", "wait", "--for=condition=Ready",
+                 "pod", "-l", "app=chromadb", "--timeout=120s")
 
     steps = [
         ("ChromaDB", "chromadb"),
@@ -989,12 +932,11 @@ def restart(
 
     for name, deployment in steps:
         console.print(f"Restarting {name}...")
-        _ssh_cmd(control, f"sudo k3s kubectl -n openclaw rollout restart deployment/{deployment}")
+        _restart_deployment(control, "openclaw", deployment)
 
     console.print("\nWaiting for pods to come up...")
-    _ssh_cmd(control,
-        "sudo k3s kubectl -n openclaw wait --for=condition=Ready pod -l app=openclaw --timeout=180s"
-    )
+    _kubectl(control, "-n", "openclaw", "wait", "--for=condition=Ready",
+             "pod", "-l", "app=openclaw", "--timeout=180s")
     console.print("[green]Stack restarted.[/green]")
 
 
@@ -1011,7 +953,8 @@ def status(
 
     console.print(f"[dim]via {control}[/dim]\n")
     for args in (["get", "nodes", "-o", "wide"], ["get", "pods", "-A"]):
-        _run(["ssh", control, "sudo", "k3s", "kubectl", *args])
+        console.print(f"[dim]$ kubectl {' '.join(args)}[/dim]")
+        _kubectl(control, *args)
         console.print()
 
 
