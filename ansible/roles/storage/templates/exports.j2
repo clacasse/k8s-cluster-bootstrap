@@ -1,3 +1,0 @@
-{% for share in nas_shares %}
-{{ nas_mount_point }}/{{ share }} *(rw,sync,no_subtree_check,root_squash,all_squash,anonuid=65534,anongid=65534)
-{% endfor %}
