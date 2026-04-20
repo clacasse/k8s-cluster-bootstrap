@@ -14,7 +14,7 @@
   roles:
     - nvidia
 
-- name: NFS storage server on storage nodes
+- name: Storage-node prep (local-path PVC dir + fstrim)
   hosts: storage
   become: true
   roles:

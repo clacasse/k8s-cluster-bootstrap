@@ -1,74 +1,21 @@
 ---
-- name: Install NFS server
-  ansible.builtin.apt:
-    name: nfs-kernel-server
-    state: present
-    update_cache: true
+# Storage node prep. A storage node is a cluster node with fast local storage
+# (NVMe) dedicated to persistent stateful workloads — Garage, CloudNativePG,
+# etc. Workloads are pinned to it via nodeAffinity + tolerations that reference
+# the node label and taint applied by the k3s-agent role at join time.
+#
+# This role assumes the NVMe is the boot disk. k3s's local-path provisioner
+# writes to /var/lib/rancher/k3s/storage/ on the root filesystem, which IS the
+# NVMe when there's no separate data disk.
 
-- name: Detect USB SSD (largest unmounted non-boot block device)
-  ansible.builtin.shell: |
-    boot_disk=$(lsblk -npo PKNAME $(findmnt -n -o SOURCE /) | head -1)
-    lsblk -dno NAME,SIZE,TYPE | awk -v boot="$boot_disk" '$3=="disk" && $2+0 > 0 && "/dev/"$1 != boot {print $1, $2}' | sort -k2 -h -r | head -1 | awk '{print $1}'
-  register: detected_disk
-  changed_when: false
-
-- name: Fail if no unmounted disk found
-  ansible.builtin.fail:
-    msg: |
-      No unmounted disk found. Plug in the USB SSD and re-run.
-      To see available disks: lsblk
-  when: detected_disk.stdout == ""
-
-- name: Set disk device path
-  ansible.builtin.set_fact:
-    nas_disk: "/dev/{{ detected_disk.stdout }}"
-
-- name: Show detected disk
-  ansible.builtin.debug:
-    msg: "Using {{ nas_disk }} for NAS storage"
-
-- name: Check if disk has a filesystem
-  ansible.builtin.command: blkid -s TYPE -o value {{ nas_disk }}
-  register: disk_fs
-  failed_when: false
-  changed_when: false
-
-- name: Format disk as ext4 if no filesystem
-  ansible.builtin.command: mkfs.ext4 -L nas {{ nas_disk }}
-  when: disk_fs.stdout == ""
-
-- name: Create mount point
+- name: Ensure k3s local-path storage directory exists
   ansible.builtin.file:
-    path: "{{ nas_mount_point }}"
+    path: /var/lib/rancher/k3s/storage
     state: directory
     mode: '0755'
 
-- name: Mount disk
-  ansible.posix.mount:
-    path: "{{ nas_mount_point }}"
-    src: "{{ nas_disk }}"
-    fstype: ext4
-    state: mounted
-    opts: defaults,noatime
-
-- name: Create NAS share directories
-  ansible.builtin.file:
-    path: "{{ nas_mount_point }}/{{ item }}"
-    state: directory
-    mode: '0755'
-    owner: root
-    group: root
-  loop: "{{ nas_shares }}"
-
-- name: Configure NFS exports
-  ansible.builtin.template:
-    src: exports.j2
-    dest: /etc/exports
-    mode: '0644'
-  notify: Restart NFS
-
-- name: Ensure NFS server is enabled and running
+- name: Enable weekly fstrim on SSD/NVMe
   ansible.builtin.systemd:
-    name: nfs-kernel-server
+    name: fstrim.timer
     enabled: true
     state: started

@@ -1,6 +1,3 @@
 ---
-nas_mount_point: /mnt/nas
-nas_shares:
-  - workspace
-  - models
-  - minio
+# No defaults needed — storage role currently has nothing to parametrize.
+# Left in place so the standard Ansible role directory structure is complete.

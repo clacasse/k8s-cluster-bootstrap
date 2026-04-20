@@ -10,12 +10,17 @@
     path: /usr/local/bin/k3s
   register: k3s_agent_binary
 
-# GPU node gets a label + taint so only AI workloads schedule there.
+# Node-role labels + taints so only workloads that opt in schedule on these nodes:
+#   - GPU: AI workloads (Ollama) tolerate nvidia.com/gpu=true
+#   - storage: stateful workloads (Garage, CNPG) tolerate node-role.kubernetes.io/storage=true
+# A node is expected to have at most one specialized role.
 - name: Set k3s agent args
   ansible.builtin.set_fact:
     k3s_agent_exec: >-
-      {% if inventory_hostname in groups['gpu'] %}
+      {% if inventory_hostname in groups.get('gpu', []) %}
       agent --node-label nvidia.com/gpu=true --node-taint nvidia.com/gpu=true:NoSchedule
+      {% elif inventory_hostname in groups.get('storage', []) %}
+      agent --node-label node-role.kubernetes.io/storage=true --node-taint node-role.kubernetes.io/storage=true:NoSchedule
       {% else %}
       agent
       {% endif %}
