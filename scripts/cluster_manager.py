@@ -494,6 +494,77 @@ def bootstrap(
     raise typer.Exit(_run(cmd, cwd=ANSIBLE_DIR).returncode)
 
 
+@app.command("remove-node")
+def remove_node(
+    hostname: str = typer.Argument(..., help="Hostname of the node to remove (e.g. k3s-storage)."),
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Remove a node from the cluster and inventory.
+
+    Drains the node, deletes it from k8s, attempts to uninstall k3s on
+    the node (skipped if unreachable), and removes it from inventory.ini.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    if hostname == control.split()[0]:
+        console.print("[red]Cannot remove the control node.[/red]")
+        raise typer.Exit(1)
+
+    if not typer.confirm(f"This will remove {hostname} from the cluster and inventory. Continue?"):
+        raise typer.Exit(0)
+
+    console.print(f"[dim]via {control}[/dim]\n")
+
+    # Drain (tolerates node being NotReady)
+    console.print(f"Draining {hostname}...")
+    _kubectl(control, "drain", hostname,
+             "--ignore-daemonsets", "--delete-emptydir-data",
+             "--force", "--timeout=60s")
+
+    # Delete from k8s
+    console.print(f"Deleting node from cluster...")
+    _kubectl(control, "delete", "node", hostname)
+
+    # Try to uninstall k3s on the node (may fail if node is down)
+    inv = ANSIBLE_DIR / "inventory.ini"
+    node_host = None
+    if inv.exists():
+        for line in inv.read_text().splitlines():
+            if line.strip().startswith(hostname):
+                parts = line.strip().split()
+                for part in parts:
+                    if part.startswith("ansible_host="):
+                        node_host = part.split("=", 1)[1]
+                break
+
+    if node_host:
+        console.print(f"Uninstalling k3s on {hostname} ({node_host})...")
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", f"clacasse@{node_host}",
+             "sudo /usr/local/bin/k3s-agent-uninstall.sh"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0:
+            console.print(f"  [green]✓[/green] k3s uninstalled on {hostname}")
+        else:
+            console.print(f"  [yellow]Could not reach {hostname} — k3s not uninstalled (node may be down)[/yellow]")
+    else:
+        console.print(f"  [yellow]Could not find IP for {hostname} in inventory — skipping k3s uninstall[/yellow]")
+
+    # Remove from inventory
+    if inv.exists():
+        lines = inv.read_text().splitlines()
+        new_lines = [l for l in lines if not l.strip().startswith(hostname)]
+        inv.write_text("\n".join(new_lines) + "\n")
+        console.print(f"  [green]✓[/green] Removed {hostname} from inventory")
+
+    console.print(f"\n[green]{hostname} removed from the cluster.[/green]")
+
+
 def _get_control_host() -> str:
     """Read the first host in [control] from inventory."""
     inv = ANSIBLE_DIR / "inventory.ini"
