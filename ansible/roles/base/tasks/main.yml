@@ -59,7 +59,7 @@
   ansible.builtin.stat:
     path: /boot/firmware/cmdline.txt
   register: pi_cmdline
-  when: ansible_architecture in ["aarch64", "arm64"]
+  when: ansible_facts['architecture'] in ["aarch64", "arm64"]
 
 - name: Enable memory cgroup on aarch64 (required by k3s on Pi)
   ansible.builtin.replace:
@@ -67,6 +67,6 @@
     regexp: '^(?!.*cgroup_memory=1)(.*)$'
     replace: '\1 cgroup_memory=1 cgroup_enable=memory'
   when:
-    - ansible_architecture in ["aarch64", "arm64"]
+    - ansible_facts['architecture'] in ["aarch64", "arm64"]
     - pi_cmdline.stat.exists | default(false)
   notify: Reboot for cgroup change
