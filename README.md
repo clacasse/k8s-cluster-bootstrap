@@ -6,14 +6,16 @@ Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes �
 
 ## What you get
 
-- **k3s** cluster: 1 server + N agents (no HA)
+- **k3s** cluster: 1 server + N agents (no HA). Node roles: `control`, `worker`, `gpu`, `storage`.
 - **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `https://argocd.apps`
 - **Ollama** deployed to the GPU node with a persistent local-path PVC — at `https://ollama.apps`
+- **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases are installed by default
+- **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps create their own buckets and access keys
 - **Node Feature Discovery (NFD)** auto-labels nodes with hardware info (PCI devices, CPU features)
 - **NVIDIA device plugin** installed via Helm so pods can request `nvidia.com/gpu: 1`
 - **Prometheus + Grafana** for hardware monitoring (CPU, memory, temperature, GPU) — at `https://grafana.apps`
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
-- A single Python CLI (`cluster_manager.py`) that drives the whole lifecycle
+- A single Python CLI (`cluster_manager.py`) that drives the whole lifecycle — including registering a **private apps repo** that Argo watches alongside this one
 
 ## How the two repos work
 
@@ -156,13 +158,22 @@ After each node is prepped, its hostname is set and registered in router DNS —
 Generates secrets and runtime config that aren't stored in git. Run once after bootstrap.
 
 ```bash
-./scripts/cluster_manager.py setup-secrets
+./scripts/cluster_manager.py setup-secrets              # app-level
+./scripts/cluster_manager.py bootstrap-infra-secrets    # infrastructure-level
 ```
 
-This creates:
+`setup-secrets` creates:
 - Wildcard TLS certificate for `*.APPS_DOMAIN` (self-signed, 10-year)
 - OpenClaw gateway token (save it — needed for the web UI)
 - Initial model selection for OpenClaw (prompts you to choose)
+- Grafana admin password
+
+`bootstrap-infra-secrets` creates:
+- `garage-auth` Secret in the `garage` namespace (`rpc_secret`, `admin_token`, `metrics_token`)
+- Applies the single-node Garage layout (idempotent: detects already-applied layout)
+- Prints the Garage admin token — save it if you want to use the admin API directly
+
+Both commands are safe to re-run.
 
 ### 7. Verify
 
@@ -208,6 +219,36 @@ Change it immediately after first login.
 ```bash
 ./scripts/cluster_manager.py status
 ```
+
+### Register a private apps repo
+
+Argo CD can watch a second repository alongside your instance repo — a private one for applications you don't want in the (public) instance repo. Use this for anything you wouldn't share: personal projects, credentials-adjacent tooling, commercial apps.
+
+```bash
+# 1. Scaffold a starter private apps repo on disk.
+./scripts/cluster_manager.py private-apps scaffold ~/my-apps
+
+# 2. Push it to a private git host of your choice (GitHub example):
+cd ~/my-apps
+git init && git add . && git commit -m "Initial scaffold"
+gh repo create my-apps --private --source . --push
+
+# 3. Register it with the cluster. Generates an ed25519 deploy key, prompts
+#    you to add the public key to the repo, then creates the Argo CD
+#    Repository Secret + AppProject + root Application.
+./scripts/cluster_manager.py private-apps setup \
+    --repo-url git@github.com:you/my-apps.git
+```
+
+Afterwards, anything you commit under `apps/<name>/` in the private repo is picked up by Argo automatically. Each `apps/<name>/` can either be raw manifests OR a child Argo Application pointing elsewhere (e.g. a separate repo with a Helm chart). See the scaffold's `README.md` for both patterns.
+
+To remove:
+
+```bash
+./scripts/cluster_manager.py private-apps unregister
+```
+
+(Does not delete the deploy key on your git host — remove that via the UI.)
 
 ### Connect Slack (optional)
 
@@ -297,7 +338,8 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
 ├── README.md
 ├── requirements.txt                    # Python deps for the CLI
 ├── scripts/
-│   └── cluster_manager.py              # typer CLI
+│   ├── cluster_manager.py              # typer CLI
+│   └── private_apps_template/          # starter content for `private-apps scaffold`
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── inventory.ini.example           # committed template (public)
@@ -316,6 +358,8 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         ├── applications/
         │   ├── root.yaml               # app-of-apps, applied by Ansible
         │   └── children/               # reconciled by root
+        │       ├── cloudnative-pg.yaml  # CNPG operator (Helm; no Cluster CR)
+        │       ├── garage.yaml          # Single-node Garage, pinned to storage node
         │       ├── ollama.yaml
         │       ├── openclaw.yaml
         │       ├── obsidian-sync.yaml
@@ -327,6 +371,7 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │       └── argocd-ingress.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
+            ├── garage/                 # configmap + service + statefulset
             ├── obsidian-sync/          # Headless Obsidian Sync for workspace
             ├── ollama/
             └── openclaw/
@@ -348,6 +393,8 @@ All pinned in `ansible/group_vars/all.yml`:
 | kube-prometheus-stack Helm chart | `83.6.0` |
 | Prometheus Operator CRDs Helm chart | `28.0.1` |
 | DCGM Exporter Helm chart | `4.4.1` |
+| CloudNativePG Helm chart | `0.24.0` |
+| Garage image | `dxflrs/garage:v1.2.0` |
 
 Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 
@@ -373,7 +420,9 @@ Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 | App delivery | Committed Application manifests + `init-fork` | Adding apps is pure git |
 | Model storage | Persistent local-path PVC on GPU node | Ephemeral = OS; don't re-pull large models |
 | External access | LAN only (HTTPS Ingress, self-signed) | No public exposure; secure context for web apps |
-| Secrets | Kubernetes Secrets created by `setup-secrets` CLI | Not in git; migrate to Sealed Secrets or external store later |
+| Secrets | Kubernetes Secrets created imperatively by CLI (`setup-secrets`, `bootstrap-infra-secrets`) | Not in git; migrate to Sealed Secrets / ExternalSecrets later |
+| Private apps | Separate repo watched by Argo, wired up via `private-apps setup` | Keeps private/personal workloads out of the public template and any public instance forks |
+| Shared infra vs. apps | Operator + object store only in this repo; no `Cluster` CRs or buckets | Consumer apps (private) create their own DB clusters + buckets in their own namespaces |
 | Model management | Runtime-only via API | No model names in repo |
 | Version pinning | All in `group_vars/all.yml` | Reproducible re-runs |
 

@@ -1,0 +1,32 @@
+# Example child Application. Copy this file, drop the `.disabled` suffix, and
+# edit for your app. Argo CD will pick it up once committed + pushed.
+#
+# This example points at a (private) app repo with a Helm chart inside it.
+# For inline manifests instead, see the README.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: private-apps
+  source:
+    repoURL: git@github.com:YOU/my-app.git
+    targetRevision: HEAD
+    path: charts/my-app
+    # For Helm charts with values overrides:
+    # helm:
+    #   values: |
+    #     replicaCount: 1
+    #     image:
+    #       tag: v1.2.3
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: my-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

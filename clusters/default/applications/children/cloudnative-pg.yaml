@@ -1,0 +1,39 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudnative-pg
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  # CloudNativePG operator only. Consumer apps (DealSignal, etc.) create their
+  # own Cluster CRs in their own namespaces. No Cluster CR installed here.
+  source:
+    repoURL: https://cloudnative-pg.github.io/charts
+    chart: cloudnative-pg
+    targetRevision: 0.24.0
+    helm:
+      releaseName: cloudnative-pg
+      values: |
+        # Operator is light; no storage-node pinning needed.
+        # Leave defaults; override only if a fork needs to.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        # Enable Prometheus scraping via the existing kube-prometheus-stack.
+        monitoring:
+          podMonitorEnabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

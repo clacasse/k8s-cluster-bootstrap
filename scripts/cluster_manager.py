@@ -1029,5 +1029,283 @@ def status(
         console.print()
 
 
+# ---------------------------------------------------------------------------
+# Infrastructure secrets: Garage tokens + layout init. Consumer apps create
+# their own Secrets + buckets in their own namespaces.
+# ---------------------------------------------------------------------------
+
+@app.command("bootstrap-infra-secrets")
+def bootstrap_infra_secrets(
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Generate Garage's auth tokens, create garage-auth Secret, apply the
+    single-node layout. Run once after Argo first syncs the garage app.
+    Idempotent — skips existing secrets and detects a layout that's already
+    applied.
+    """
+    import secrets as secrets_mod
+
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+
+    # --- garage-auth Secret ---
+    if _kubectl_exists(control, "garage", "secret", "garage-auth"):
+        console.print("[dim]garage-auth already exists, skipping secret creation.[/dim]")
+    else:
+        _ensure_namespace(control, "garage")
+        rpc_secret = secrets_mod.token_hex(32)      # Garage expects hex
+        admin_token = secrets_mod.token_urlsafe(32)
+        metrics_token = secrets_mod.token_urlsafe(32)
+
+        _kubectl(control, "-n", "garage", "create", "secret", "generic", "garage-auth",
+                 f"--from-literal=rpc_secret={rpc_secret}",
+                 f"--from-literal=admin_token={admin_token}",
+                 f"--from-literal=metrics_token={metrics_token}")
+        console.print("[green]✓[/green] garage-auth Secret created.")
+        console.print(f"\n[bold]Admin token (save it — grants full Garage admin API access):[/bold]")
+        console.print(f"  [cyan]{admin_token}[/cyan]\n")
+
+        # Restart StatefulSet so any crashlooping pod picks up the new Secret.
+        _kubectl(control, "-n", "garage", "rollout", "restart", "statefulset/garage")
+
+    # --- wait for garage-0 ready ---
+    console.print("Waiting for garage-0 to be ready...")
+    rc = _kubectl(control, "-n", "garage", "wait", "--for=condition=ready",
+                  "pod/garage-0", "--timeout=120s").returncode
+    if rc != 0:
+        console.print("[red]garage-0 did not become ready. Check: kubectl -n garage logs garage-0[/red]")
+        raise typer.Exit(1)
+
+    # --- layout init (idempotent) ---
+    # garage layout show lists assigned roles. If the single node already has a
+    # capacity assigned, skip; otherwise assign + apply.
+    layout_show = _kubectl(control, "-n", "garage", "exec", "garage-0", "--",
+                           "/garage", "layout", "show", capture=True).stdout
+    if "capacity" in layout_show.lower() and "role" in layout_show.lower():
+        console.print("[dim]Garage layout already applied, skipping.[/dim]")
+    else:
+        console.print("Applying Garage single-node layout...")
+        node_id = _kubectl(control, "-n", "garage", "exec", "garage-0", "--",
+                           "/garage", "node", "id", "-q", capture=True).stdout.strip()
+        # Output may be "<full_id>@<addr>"; take the hex prefix.
+        node_id_short = node_id.split("@", 1)[0][:16]
+        _kubectl(control, "-n", "garage", "exec", "garage-0", "--",
+                 "/garage", "layout", "assign", "-z", "dc1", "-c", "50G",
+                 node_id_short)
+        _kubectl(control, "-n", "garage", "exec", "garage-0", "--",
+                 "/garage", "layout", "apply", "--version", "1")
+        console.print("[green]✓[/green] Garage layout applied.")
+
+    console.print()
+    console.print("[green]Infra secrets bootstrap complete.[/green]")
+    console.print("  S3 endpoint (in-cluster): [cyan]http://garage-s3.garage.svc:3900[/cyan]")
+    console.print("  Admin API (in-cluster):   [cyan]http://garage-s3.garage.svc:3903[/cyan]")
+    console.print("  Consumer apps: create your own access keys via the admin API and")
+    console.print("                 store them in your app's own namespace Secret.")
+
+
+# ---------------------------------------------------------------------------
+# Private apps repo: Argo CD watches a separate private repo for the operator's
+# private applications, keeping them out of the public bootstrap repo entirely.
+# ---------------------------------------------------------------------------
+
+PRIVATE_APPS_TEMPLATE_DIR = REPO_DIR / "scripts" / "private_apps_template"
+
+private_apps_app = typer.Typer(
+    name="private-apps",
+    help="Set up Argo CD to watch a private apps repo for your non-shareable workloads.",
+    no_args_is_help=True,
+)
+app.add_typer(private_apps_app)
+
+
+def _apply_yaml(control: str, yaml_text: str) -> None:
+    """kubectl apply a YAML document supplied via stdin."""
+    subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl", "apply", "-f", "-"],
+        input=yaml_text, text=True, check=True,
+    )
+
+
+@private_apps_app.command("scaffold")
+def private_apps_scaffold(
+    path: Path = typer.Argument(..., help="Directory to create for the new private apps repo."),
+) -> None:
+    """Scaffold a starter private apps repo directory on disk."""
+    import shutil
+
+    if path.exists() and any(path.iterdir()):
+        console.print(f"[red]{path} already exists and is not empty.[/red]")
+        raise typer.Exit(1)
+
+    shutil.copytree(PRIVATE_APPS_TEMPLATE_DIR, path, dirs_exist_ok=True)
+    console.print(f"  [green]✓[/green] Scaffolded private apps repo at {path}")
+    console.print()
+    console.print("Next steps:")
+    console.print(f"  cd {path}")
+    console.print("  git init && git add . && git commit -m 'Initial scaffold'")
+    console.print("  gh repo create <name> --private --source . --push")
+    console.print("  cluster_manager.py private-apps setup --repo-url git@github.com:you/<name>.git")
+
+
+@private_apps_app.command("setup")
+def private_apps_setup(
+    repo_url: str = typer.Option(..., "--repo-url", help="SSH URL of the private apps repo (git@...)."),
+    ssh_key_path: Path = typer.Option(
+        None, "--ssh-key-path",
+        help="Path for the Argo CD SSH deploy key. Default: ~/.ssh/argocd-<project>.key",
+    ),
+    project_name: str = typer.Option(
+        "private-apps", "--project-name",
+        help="Argo CD AppProject name. Default: private-apps.",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Register a private apps repo with Argo CD.
+
+    Generates an SSH deploy key, prompts you to add the public key to the repo,
+    then applies three manifests to the cluster: a Repository Secret, an
+    AppProject, and a root app-of-apps Application that watches <repo>/apps.
+    Idempotent — safe to re-run.
+    """
+    if not re.match(r"^(git@|ssh://)", repo_url):
+        console.print(f"[red]--repo-url must be SSH (git@... or ssh://...). Got: {repo_url}[/red]")
+        raise typer.Exit(1)
+
+    if control is None:
+        control = _get_control_host()
+
+    if ssh_key_path is None:
+        ssh_key_path = Path.home() / ".ssh" / f"argocd-{project_name}.key"
+    pub_key_path = ssh_key_path.with_suffix(ssh_key_path.suffix + ".pub")
+
+    # 1. SSH keypair
+    if not ssh_key_path.exists():
+        ssh_key_path.parent.mkdir(mode=0o700, exist_ok=True)
+        console.print(f"Generating SSH deploy key at [cyan]{ssh_key_path}[/cyan]")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "",
+             "-C", f"argocd-{project_name}@{_get_repo_url().rsplit('/', 1)[-1]}",
+             "-f", str(ssh_key_path)],
+            check=True,
+        )
+    else:
+        console.print(f"  [dim]Reusing existing key at {ssh_key_path}[/dim]")
+
+    pub_key = pub_key_path.read_text().strip()
+    private_key = ssh_key_path.read_text()
+
+    # 2. Prompt for deploy-key addition
+    console.print()
+    console.print("[bold]Add this as a deploy key (read-only) on your private repo:[/bold]")
+    console.print()
+    console.print(f"  [cyan]{pub_key}[/cyan]")
+    console.print()
+    console.print(f"  GitHub UI: {repo_url.replace('git@github.com:', 'https://github.com/').replace('.git', '')}/settings/keys/new")
+    console.print()
+    typer.prompt("Press Enter once the deploy key is added", default="", show_default=False)
+
+    # 3. Repository Secret
+    secret_name = f"{project_name}-repo"
+    indented_key = "\n".join("    " + line for line in private_key.splitlines())
+    repo_secret = f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {secret_name}
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: {repo_url}
+  project: {project_name}
+  sshPrivateKey: |
+{indented_key}
+"""
+    console.print(f"Applying Repository Secret [cyan]{secret_name}[/cyan]")
+    _apply_yaml(control, repo_secret)
+
+    # 4. AppProject
+    app_project = f"""\
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {project_name}
+  namespace: argocd
+spec:
+  description: Private apps repository
+  sourceRepos:
+    - '*'
+  destinations:
+    - namespace: '*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+"""
+    console.print(f"Applying AppProject [cyan]{project_name}[/cyan]")
+    _apply_yaml(control, app_project)
+
+    # 5. Root Application (app-of-apps)
+    root_app = f"""\
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {project_name}-root
+  namespace: argocd
+spec:
+  project: {project_name}
+  source:
+    repoURL: {repo_url}
+    targetRevision: HEAD
+    path: apps
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+"""
+    console.print(f"Applying root Application [cyan]{project_name}-root[/cyan]")
+    _apply_yaml(control, root_app)
+
+    console.print()
+    console.print(f"[green]✓[/green] Private apps repo [cyan]{repo_url}[/cyan] registered with Argo CD.")
+    console.print(f"  Commit anything under [cyan]apps/[/cyan] and Argo will sync it.")
+
+
+@private_apps_app.command("unregister")
+def private_apps_unregister(
+    project_name: str = typer.Option("private-apps", "--project-name"),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Remove the Argo CD Application, AppProject, and Repository Secret for a private apps repo."""
+    if control is None:
+        control = _get_control_host()
+
+    for kind, name in [
+        ("application", f"{project_name}-root"),
+        ("appproject", project_name),
+        ("secret", f"{project_name}-repo"),
+    ]:
+        console.print(f"Deleting [cyan]{kind}/{name}[/cyan]")
+        _kubectl(control, "-n", "argocd", "delete", kind, name, "--ignore-not-found")
+
+    console.print()
+    console.print(f"[green]✓[/green] Unregistered private apps project '{project_name}'.")
+    console.print("[dim]Reminder: remove the deploy key from your private repo via the git host UI.[/dim]")
+
+
 if __name__ == "__main__":
     app()

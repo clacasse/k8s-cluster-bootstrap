@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  namespace: garage
+spec:
+  clusterIP: None   # Headless so StatefulSet pods get stable DNS (garage-0.garage)
+  selector:
+    app: garage
+  ports:
+    - name: s3
+      port: 3900
+      targetPort: 3900
+    - name: rpc
+      port: 3901
+      targetPort: 3901
+    - name: admin
+      port: 3903
+      targetPort: 3903
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-s3
+  namespace: garage
+  labels:
+    app.kubernetes.io/name: garage
+spec:
+  # Regular ClusterIP for consumers that just want the S3 API without knowing
+  # pod ordinals. Consumers use: garage-s3.garage.svc:3900
+  type: ClusterIP
+  selector:
+    app: garage
+  ports:
+    - name: s3
+      port: 3900
+      targetPort: 3900
+    - name: admin
+      port: 3903
+      targetPort: 3903
