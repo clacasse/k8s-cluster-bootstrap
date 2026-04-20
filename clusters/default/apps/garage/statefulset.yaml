@@ -32,6 +32,8 @@ spec:
           # this writing. Also pinnable to a digest for reproducibility.
           image: dxflrs/garage:v1.2.0
           imagePullPolicy: IfNotPresent
+          # Image has no ENTRYPOINT; be explicit about both command and args.
+          command: ["/garage"]
           args: ["server"]
           ports:
             - { name: s3,    containerPort: 3900 }
