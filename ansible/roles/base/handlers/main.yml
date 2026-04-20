@@ -1,0 +1,5 @@
+---
+- name: Reboot for cgroup change
+  ansible.builtin.reboot:
+    msg: "Rebooting to enable memory cgroup for k3s"
+    reboot_timeout: 600
