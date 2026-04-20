@@ -12,15 +12,17 @@
 
 # Node-role labels + taints so only workloads that opt in schedule on these nodes:
 #   - GPU: AI workloads (Ollama) tolerate nvidia.com/gpu=true
-#   - storage: stateful workloads (Garage, CNPG) tolerate node-role.kubernetes.io/storage=true
-# A node is expected to have at most one specialized role.
+#   - storage: stateful workloads (Garage, CNPG) tolerate role=storage
+# Keys avoid the kubernetes.io/ namespace: kubelet rejects self-registered labels
+# there with the error "unknown 'kubernetes.io' or 'k8s.io' labels specified with
+# --node-labels". Use a plain vendor-neutral key instead.
 - name: Set k3s agent args
   ansible.builtin.set_fact:
     k3s_agent_exec: >-
       {% if inventory_hostname in groups.get('gpu', []) %}
       agent --node-label nvidia.com/gpu=true --node-taint nvidia.com/gpu=true:NoSchedule
       {% elif inventory_hostname in groups.get('storage', []) %}
-      agent --node-label node-role.kubernetes.io/storage=true --node-taint node-role.kubernetes.io/storage=true:NoSchedule
+      agent --node-label role=storage --node-taint role=storage:NoSchedule
       {% else %}
       agent
       {% endif %}
