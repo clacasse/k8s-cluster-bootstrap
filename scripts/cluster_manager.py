@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -1794,10 +1795,166 @@ def provision_s3_app(
 
 
 # ---------------------------------------------------------------------------
+# Image pull secrets — dockerconfigjson + default SA patch.
+# ---------------------------------------------------------------------------
+
+def _resolve_registry_token(registry: str, username: str) -> str:
+    """Resolve a registry token without ever writing it to disk.
+
+    Order: $<REGISTRY>_TOKEN env var, then (for ghcr.io only) `gh auth token`,
+    then interactive prompt with hidden input.
+    """
+    env_var = f"{registry.split('.')[0].upper()}_TOKEN"
+    token = os.environ.get(env_var)
+    if token and token.strip():
+        console.print(f"  [dim]Using ${env_var}[/dim]")
+        return token.strip()
+
+    if registry == "ghcr.io":
+        try:
+            r = subprocess.run(
+                ["gh", "auth", "token"], capture_output=True, text=True, check=True,
+            )
+            if r.stdout.strip():
+                console.print("  [dim]Using `gh auth token`[/dim]")
+                return r.stdout.strip()
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+
+    return typer.prompt(
+        f"Personal access token for {username}@{registry} (needs read:packages)",
+        hide_input=True,
+    ).strip()
+
+
+def _attach_pull_secret_to_default_sa(control: str, namespace: str, secret_name: str) -> None:
+    """Idempotently append secret_name to the default SA's imagePullSecrets.
+
+    Read-modify-write so we don't clobber other pull secrets attached to the SA.
+    """
+    r = _kubectl(
+        control, "-n", namespace, "get", "sa", "default", "-o", "json",
+        capture=True, check=True,
+    )
+    sa = json.loads(r.stdout)
+    existing = sa.get("imagePullSecrets") or []
+    if any(item.get("name") == secret_name for item in existing):
+        console.print(f"  [dim]default SA already references [cyan]{secret_name}[/cyan][/dim]")
+        return
+
+    patch = json.dumps({"imagePullSecrets": existing + [{"name": secret_name}]})
+    _kubectl(control, "-n", namespace, "patch", "sa", "default", "-p", patch, check=True)
+    console.print(f"  [dim]Attached [cyan]{secret_name}[/cyan] to default SA[/dim]")
+
+
+def _provision_image_pull_secret(
+    control: str,
+    *,
+    namespace: str,
+    secret_name: str,
+    registry: str,
+    username: str,
+    token: str,
+    patch_default_sa: bool = True,
+) -> None:
+    """Create a dockerconfigjson Secret and optionally wire it to the default SA.
+
+    Patching the default SA means every Pod in the namespace automatically gets
+    the pull secret without its Deployment/CronJob spec having to mention it —
+    which keeps the chart backend-agnostic (it doesn't know whether the registry
+    is public or private).
+    """
+    _ensure_namespace(control, namespace)
+
+    auth_b64 = base64.b64encode(f"{username}:{token}".encode()).decode()
+    docker_config = {"auths": {registry: {"username": username, "auth": auth_b64}}}
+    config_b64 = base64.b64encode(json.dumps(docker_config).encode()).decode()
+
+    secret_yaml = f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: {secret_name}
+  namespace: {namespace}
+  labels:
+    cluster-manager/image-pull-secret: "true"
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {config_b64}
+"""
+    console.print(f"Writing dockerconfigjson Secret [cyan]{namespace}/{secret_name}[/cyan] for [cyan]{registry}[/cyan]")
+    _apply_yaml(control, secret_yaml)
+
+    # Invariant: what we applied came back intact — the registry host round-trips
+    # through base64 decoding of .dockerconfigjson.
+    r = _kubectl(
+        control, "-n", namespace, "get", "secret", secret_name,
+        "-o", "jsonpath={.data.\\.dockerconfigjson}",
+        capture=True, check=True,
+    )
+    try:
+        stored = base64.b64decode((r.stdout or "").strip()).decode()
+    except (ValueError, UnicodeDecodeError):
+        stored = ""
+    if registry not in stored:
+        console.print(
+            f"[red]invariant: stored dockerconfigjson for {namespace}/{secret_name} "
+            f"does not contain registry {registry!r}[/red]"
+        )
+        raise typer.Exit(1)
+
+    if patch_default_sa:
+        _attach_pull_secret_to_default_sa(control, namespace, secret_name)
+
+    console.print(f"[green]✓[/green] Image pull secret [cyan]{namespace}/{secret_name}[/cyan]")
+
+
+@app.command("add-image-pull-secret")
+def add_image_pull_secret(
+    namespace: str = typer.Option(..., "--namespace", "-n"),
+    username: str = typer.Option(..., "--username", "-u"),
+    registry: str = typer.Option("ghcr.io", "--registry"),
+    secret_name: str = typer.Option(
+        None, "--secret-name",
+        help="Secret name. Default: <registry-short>-pull (e.g. ghcr-pull).",
+    ),
+    no_patch_default_sa: bool = typer.Option(
+        False, "--no-patch-default-sa",
+        help="Don't wire the secret into the namespace's default ServiceAccount.",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Provision an image pull Secret for a private registry.
+
+    Typically invoked indirectly via `app-provision`. Use standalone for
+    one-off namespaces outside a per-app manifest.
+
+    Token resolution (no token ever written to disk or argv):
+      1. $<REGISTRY>_TOKEN env var (e.g. $GHCR_TOKEN)
+      2. `gh auth token` (ghcr.io only, if the gh CLI is authed)
+      3. Hidden interactive prompt
+    """
+    if control is None:
+        control = _get_control_host()
+    if secret_name is None:
+        secret_name = f"{registry.split('.')[0]}-pull"
+
+    token = _resolve_registry_token(registry, username)
+    _provision_image_pull_secret(
+        control,
+        namespace=namespace,
+        secret_name=secret_name,
+        registry=registry,
+        username=username,
+        token=token,
+        patch_default_sa=not no_patch_default_sa,
+    )
+
+
+# ---------------------------------------------------------------------------
 # app-provision — single entry point driven by a per-app manifest.
 # ---------------------------------------------------------------------------
 
-_PROVISION_SPEC_KEYS = {"namespace", "repos", "s3"}
+_PROVISION_SPEC_KEYS = {"namespace", "repos", "s3", "imagePullSecrets"}
 
 
 def _resolve_manifest_path(path: Path) -> Path:
@@ -1849,6 +2006,20 @@ def _load_provision_spec(path: Path) -> dict:
         if not isinstance(s3.get("buckets"), list) or not all(isinstance(b, str) for b in s3["buckets"]):
             console.print(f"[red]{path}: s3[{i}].buckets must be a list of strings[/red]")
             raise typer.Exit(1)
+    for i, ip in enumerate(spec.get("imagePullSecrets") or []):
+        if not isinstance(ip, dict):
+            console.print(f"[red]{path}: imagePullSecrets[{i}] must be a mapping[/red]")
+            raise typer.Exit(1)
+        for field in ("registry", "username"):
+            if not isinstance(ip.get(field), str):
+                console.print(f"[red]{path}: imagePullSecrets[{i}].{field} must be a string[/red]")
+                raise typer.Exit(1)
+        if "secret" in ip and not isinstance(ip["secret"], str):
+            console.print(f"[red]{path}: imagePullSecrets[{i}].secret must be a string[/red]")
+            raise typer.Exit(1)
+        if "patchDefaultServiceAccount" in ip and not isinstance(ip["patchDefaultServiceAccount"], bool):
+            console.print(f"[red]{path}: imagePullSecrets[{i}].patchDefaultServiceAccount must be a bool[/red]")
+            raise typer.Exit(1)
     return spec
 
 
@@ -1874,10 +2045,16 @@ def app_provision(
           - secret: <secret-name>
             buckets: [<name>, ...]
             keyName: <name>                      # optional, default <secret>-key
+        imagePullSecrets:                        # optional
+          - registry: ghcr.io
+            username: <github-user>
+            secret: <secret-name>                # optional, default <registry-short>-pull
+            patchDefaultServiceAccount: true     # optional, default true
 
     Idempotent end-to-end: already-registered repos are detected by stored URL
     and skipped without the GitHub deploy-key prompt; existing Garage buckets
-    and keys are reused.
+    and keys are reused; the default SA's imagePullSecrets list is updated in
+    place without clobbering other entries.
     """
     if control is None:
         control = _get_control_host()
@@ -1896,6 +2073,21 @@ def app_provision(
             control,
             repo["url"],
             project=repo.get("project", "*"),
+        )
+
+    for ip in spec.get("imagePullSecrets") or []:
+        registry = ip["registry"]
+        username = ip["username"]
+        secret_name = ip.get("secret") or f"{registry.split('.')[0]}-pull"
+        token = _resolve_registry_token(registry, username)
+        _provision_image_pull_secret(
+            control,
+            namespace=namespace,
+            secret_name=secret_name,
+            registry=registry,
+            username=username,
+            token=token,
+            patch_default_sa=ip.get("patchDefaultServiceAccount", True),
         )
 
     for s3 in spec.get("s3") or []:
