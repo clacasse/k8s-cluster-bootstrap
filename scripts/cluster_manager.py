@@ -1552,39 +1552,57 @@ def _prompt_for_deploy_key(pub_key: str, repo_url: str) -> None:
     typer.prompt("Press Enter once the deploy key is added", default="", show_default=False)
 
 
-@app.command("add-repo-secret")
-def add_repo_secret(
-    repo_url: str = typer.Option(..., "--repo-url", help="SSH URL of the repo to register."),
-    ssh_key_path: Path = typer.Option(
-        None, "--ssh-key-path",
-        help="Path for the SSH deploy key. Default: ~/.ssh/argocd-<name>.key",
-    ),
-    name: str = typer.Option(
-        None, "--name",
-        help="Repository Secret name. Default: <repo-slug>-repo.",
-    ),
-    project: str = typer.Option(
-        "*", "--project",
-        help="Argo AppProject that may use this repo. Default: * (any).",
-    ),
-    control: str = typer.Option(None, "--control", "-c"),
-) -> None:
-    """Register a git repository with Argo CD as a Repository Secret.
+_REPO_URL_RE = re.compile(r"^(git@[\w.\-]+:.+|ssh://.+)$")
 
-    Use this when a child Argo Application needs to clone a private repo
-    besides the root private-apps repo — e.g., a private application repo
-    whose Helm chart is deployed from a separate location.
 
-    Generates an SSH deploy key, prompts you to add the public key to the
-    repo, then applies the Argo Repository Secret. Argo picks the matching
-    Secret automatically based on URL when a child Application references it.
+def _find_repo_secret_by_url(control: str, repo_url: str) -> str | None:
+    """Return the name of a Repository Secret whose stored `url` matches, or None.
+
+    Only looks at Secrets labeled `cluster-manager/repo-secret=true` — i.e., those
+    created by this CLI. Prevents false positives against hand-rolled repo creds.
     """
-    if not re.match(r"^(git@[\w.\-]+:.+|ssh://.+)$", repo_url):
-        console.print(f"[red]--repo-url must be 'git@HOST:PATH' or 'ssh://...'. Got: {repo_url!r}[/red]")
-        raise typer.Exit(1)
+    r = _kubectl(
+        control, "-n", "argocd", "get", "secrets",
+        "-l", "cluster-manager/repo-secret=true",
+        "-o", "json", capture=True, check=True,
+    )
+    try:
+        data = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    for item in data.get("items", []):
+        stored_url_b64 = item.get("data", {}).get("url")
+        if not stored_url_b64:
+            continue
+        try:
+            stored_url = base64.b64decode(stored_url_b64).decode().strip()
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if stored_url == repo_url:
+            return item.get("metadata", {}).get("name")
+    return None
 
-    if control is None:
-        control = _get_control_host()
+
+def _register_repo(
+    control: str,
+    repo_url: str,
+    *,
+    name: str | None = None,
+    project: str = "*",
+    ssh_key_path: Path | None = None,
+) -> bool:
+    """Register a repo with Argo CD. Returns True if newly registered, False if already present.
+
+    Idempotent short-circuit: if a labeled Repository Secret already stores this
+    exact URL, return False without generating a key or prompting the user.
+    """
+    if not _REPO_URL_RE.match(repo_url):
+        raise typer.BadParameter(f"repo-url must be 'git@HOST:PATH' or 'ssh://...'. Got: {repo_url!r}")
+
+    existing = _find_repo_secret_by_url(control, repo_url)
+    if existing:
+        console.print(f"  [dim]Repo [cyan]{repo_url}[/cyan] already registered as Secret [cyan]{existing}[/cyan] — skipping.[/dim]")
+        return False
 
     if name is None:
         name = f"{_derive_project_name(repo_url)}-repo"
@@ -1617,12 +1635,42 @@ stringData:
         control, namespace="argocd", name=name,
         field="url", expected=repo_url, context="Repository Secret",
     )
-
-    console.print()
     console.print(
         f"[green]✓[/green] Registered repo [cyan]{repo_url}[/cyan] as "
         f"Secret [cyan]{name}[/cyan] (project [cyan]{project}[/cyan])."
     )
+    return True
+
+
+@app.command("add-repo-secret")
+def add_repo_secret(
+    repo_url: str = typer.Option(..., "--repo-url", help="SSH URL of the repo to register."),
+    ssh_key_path: Path = typer.Option(
+        None, "--ssh-key-path",
+        help="Path for the SSH deploy key. Default: ~/.ssh/argocd-<name>.key",
+    ),
+    name: str = typer.Option(
+        None, "--name",
+        help="Repository Secret name. Default: <repo-slug>-repo.",
+    ),
+    project: str = typer.Option(
+        "*", "--project",
+        help="Argo AppProject that may use this repo. Default: * (any).",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Register a git repository with Argo CD as a Repository Secret.
+
+    Use this when a child Argo Application needs to clone a private repo
+    besides the root private-apps repo — e.g., a private application repo
+    whose Helm chart is deployed from a separate location.
+
+    Typically invoked indirectly via `app-provision`. Use this standalone form
+    for repos that don't have a per-app provisioning manifest.
+    """
+    if control is None:
+        control = _get_control_host()
+    _register_repo(control, repo_url, name=name, project=project, ssh_key_path=ssh_key_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1643,6 +1691,72 @@ def _parse_garage_key_info(stdout: str) -> tuple[str, str]:
     return key_match.group(1), sec_match.group(1)
 
 
+def _provision_s3_app_creds(
+    control: str,
+    *,
+    key_name: str,
+    namespace: str,
+    secret_name: str,
+    buckets: list[str],
+) -> None:
+    """Provision Garage buckets + access key + k8s Secret. Idempotent.
+
+    Buckets that exist are reused. A key with `key_name` is reused; its secret
+    is re-read via `--show-secret` so the k8s Secret always reflects the live
+    credential. The resulting Secret exposes `accessKeyId` / `secretAccessKey`.
+    """
+    _ensure_namespace(control, namespace)
+
+    for bucket in buckets:
+        console.print(f"Ensuring bucket [cyan]{bucket}[/cyan]")
+        r = _kubectl(
+            control, "-n", "garage", "exec", "garage-0", "--",
+            "/garage", "bucket", "create", bucket, capture=True,
+        )
+        combined = (r.stderr or "") + (r.stdout or "")
+        if r.returncode != 0 and "already exists" not in combined.lower():
+            console.print(f"[red]bucket create failed: {combined.strip()}[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"Ensuring access key [cyan]{key_name}[/cyan]")
+    r = _kubectl(
+        control, "-n", "garage", "exec", "garage-0", "--",
+        "/garage", "key", "create", key_name, capture=True,
+    )
+    combined = (r.stderr or "") + (r.stdout or "")
+    if r.returncode != 0 and "already exists" not in combined.lower():
+        console.print(f"[red]key create failed: {combined.strip()}[/red]")
+        raise typer.Exit(1)
+
+    for bucket in buckets:
+        _kubectl(
+            control, "-n", "garage", "exec", "garage-0", "--",
+            "/garage", "bucket", "allow",
+            "--read", "--write", "--owner",
+            "--key", key_name, bucket, check=True,
+        )
+
+    r = _kubectl(
+        control, "-n", "garage", "exec", "garage-0", "--",
+        "/garage", "key", "info", key_name, "--show-secret",
+        capture=True, check=True,
+    )
+    access_key_id, secret_access_key = _parse_garage_key_info(r.stdout or "")
+
+    console.print(f"Writing Secret [cyan]{namespace}/{secret_name}[/cyan]")
+    _ssh(
+        control,
+        f"sudo k3s kubectl -n {_q(namespace)} create secret generic {_q(secret_name)}"
+        f" --from-literal=accessKeyId={_q(access_key_id)}"
+        f" --from-literal=secretAccessKey={_q(secret_access_key)}"
+        f" --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+        check=True,
+    )
+
+    console.print(f"[green]✓[/green] Secret [cyan]{namespace}/{secret_name}[/cyan] with buckets [cyan]{', '.join(buckets)}[/cyan]")
+
+
 @app.command("provision-s3-app")
 def provision_s3_app(
     app_name: str = typer.Option(..., "--app", help="App name. Used for key name and default Secret name."),
@@ -1654,15 +1768,10 @@ def provision_s3_app(
     ),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
-    """Provision Garage buckets + access key for an app, then write the
-    credentials into a k8s Secret in the target namespace.
+    """Provision Garage buckets + access key + k8s Secret for one app.
 
-    Idempotent: buckets that exist are reused, a key with the same name is
-    reused (its secret is re-read via `--show-secret` and the k8s Secret
-    gets the latest values).
-
-    The resulting Secret has two keys — `accessKeyId` and `secretAccessKey` —
-    matching what the DealSignal chart (and most S3-consuming charts) expect.
+    Typically invoked indirectly via `app-provision`. Use this standalone form
+    for one-off provisioning outside a per-app manifest.
     """
     if control is None:
         control = _get_control_host()
@@ -1675,68 +1784,134 @@ def provision_s3_app(
         console.print("[red]--buckets is empty[/red]")
         raise typer.Exit(1)
 
-    key_name = f"{app_name}-key"
+    _provision_s3_app_creds(
+        control,
+        key_name=f"{app_name}-key",
+        namespace=namespace,
+        secret_name=secret_name,
+        buckets=bucket_list,
+    )
+
+
+# ---------------------------------------------------------------------------
+# app-provision — single entry point driven by a per-app manifest.
+# ---------------------------------------------------------------------------
+
+_PROVISION_SPEC_KEYS = {"namespace", "repos", "s3"}
+
+
+def _resolve_manifest_path(path: Path) -> Path:
+    """Accept either a file or a directory containing `provision.yaml`."""
+    if path.is_dir():
+        candidate = path / "provision.yaml"
+        if not candidate.exists():
+            console.print(f"[red]{path} is a directory but has no provision.yaml[/red]")
+            raise typer.Exit(1)
+        return candidate
+    if not path.exists():
+        console.print(f"[red]Manifest not found: {path}[/red]")
+        raise typer.Exit(1)
+    return path
+
+
+def _load_provision_spec(path: Path) -> dict:
+    try:
+        import yaml
+    except ImportError:
+        console.print("[red]pyyaml is required for app-provision. Install with: pip install -r requirements.txt[/red]")
+        raise typer.Exit(1)
+    try:
+        spec = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as e:
+        console.print(f"[red]YAML parse error in {path}: {e}[/red]")
+        raise typer.Exit(1)
+    if not isinstance(spec, dict):
+        console.print(f"[red]{path}: top-level document must be a mapping[/red]")
+        raise typer.Exit(1)
+    if "namespace" not in spec or not isinstance(spec["namespace"], str):
+        console.print(f"[red]{path}: missing or non-string 'namespace'[/red]")
+        raise typer.Exit(1)
+    unknown = set(spec) - _PROVISION_SPEC_KEYS
+    if unknown:
+        console.print(f"[red]{path}: unknown top-level fields: {sorted(unknown)}[/red]")
+        raise typer.Exit(1)
+    for i, repo in enumerate(spec.get("repos") or []):
+        if not isinstance(repo, dict) or not isinstance(repo.get("url"), str):
+            console.print(f"[red]{path}: repos[{i}] must be a mapping with string 'url'[/red]")
+            raise typer.Exit(1)
+    for i, s3 in enumerate(spec.get("s3") or []):
+        if not isinstance(s3, dict):
+            console.print(f"[red]{path}: s3[{i}] must be a mapping[/red]")
+            raise typer.Exit(1)
+        if not isinstance(s3.get("secret"), str):
+            console.print(f"[red]{path}: s3[{i}].secret must be a string[/red]")
+            raise typer.Exit(1)
+        if not isinstance(s3.get("buckets"), list) or not all(isinstance(b, str) for b in s3["buckets"]):
+            console.print(f"[red]{path}: s3[{i}].buckets must be a list of strings[/red]")
+            raise typer.Exit(1)
+    return spec
+
+
+@app.command("app-provision")
+def app_provision(
+    manifest: Path = typer.Argument(..., help="Path to a provisioning YAML, or a directory containing provision.yaml."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Run a per-app provisioning manifest — one idempotent command per app.
+
+    Reads a spec that declares everything an app needs *before* Argo CD syncs
+    it: its namespace, any private repos Argo must be able to pull, and any
+    Garage S3 bucket+credential bundles. Replaces chaining `add-repo-secret`
+    and multiple `provision-s3-app` calls by hand.
+
+    Spec shape:
+
+        namespace: <ns>                          # required
+        repos:                                   # optional
+          - url: git@host:org/repo.git
+            project: <argo-project>              # optional, default "*"
+        s3:                                      # optional; one entry per Secret
+          - secret: <secret-name>
+            buckets: [<name>, ...]
+            keyName: <name>                      # optional, default <secret>-key
+
+    Idempotent end-to-end: already-registered repos are detected by stored URL
+    and skipped without the GitHub deploy-key prompt; existing Garage buckets
+    and keys are reused.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    path = _resolve_manifest_path(manifest)
+    spec = _load_provision_spec(path)
+
+    namespace = spec["namespace"]
+    console.print(f"[bold]Provisioning from[/bold] [cyan]{path}[/cyan]  →  namespace [cyan]{namespace}[/cyan]")
+    console.print()
 
     _ensure_namespace(control, namespace)
 
-    # 1. Buckets (idempotent).
-    for bucket in bucket_list:
-        console.print(f"Ensuring bucket [cyan]{bucket}[/cyan]")
-        r = _kubectl(
-            control, "-n", "garage", "exec", "garage-0", "--",
-            "/garage", "bucket", "create", bucket, capture=True,
-        )
-        combined = (r.stderr or "") + (r.stdout or "")
-        if r.returncode != 0 and "already exists" not in combined.lower():
-            console.print(f"[red]bucket create failed: {combined.strip()}[/red]")
-            raise typer.Exit(1)
-
-    # 2. Key (idempotent).
-    console.print(f"Ensuring access key [cyan]{key_name}[/cyan]")
-    r = _kubectl(
-        control, "-n", "garage", "exec", "garage-0", "--",
-        "/garage", "key", "create", key_name, capture=True,
-    )
-    combined = (r.stderr or "") + (r.stdout or "")
-    if r.returncode != 0 and "already exists" not in combined.lower():
-        console.print(f"[red]key create failed: {combined.strip()}[/red]")
-        raise typer.Exit(1)
-
-    # 3. Grant read+write+owner on each bucket. Idempotent.
-    for bucket in bucket_list:
-        _kubectl(
-            control, "-n", "garage", "exec", "garage-0", "--",
-            "/garage", "bucket", "allow",
-            "--read", "--write", "--owner",
-            "--key", key_name, bucket, check=True,
+    for repo in spec.get("repos") or []:
+        _register_repo(
+            control,
+            repo["url"],
+            project=repo.get("project", "*"),
         )
 
-    # 4. Read the key's secret back.
-    r = _kubectl(
-        control, "-n", "garage", "exec", "garage-0", "--",
-        "/garage", "key", "info", key_name, "--show-secret",
-        capture=True, check=True,
-    )
-    access_key_id, secret_access_key = _parse_garage_key_info(r.stdout or "")
-
-    # 5. Create/update the k8s Secret (idempotent via dry-run + apply).
-    console.print(f"Writing Secret [cyan]{namespace}/{secret_name}[/cyan]")
-    _ssh(
-        control,
-        f"sudo k3s kubectl -n {_q(namespace)} create secret generic {_q(secret_name)}"
-        f" --from-literal=accessKeyId={_q(access_key_id)}"
-        f" --from-literal=secretAccessKey={_q(secret_access_key)}"
-        f" --dry-run=client -o yaml"
-        f" | sudo k3s kubectl apply -f -",
-        check=True,
-    )
+    for s3 in spec.get("s3") or []:
+        secret_name = s3["secret"]
+        bucket_list = list(s3["buckets"])
+        key_name = s3.get("keyName") or f"{secret_name}-key"
+        _provision_s3_app_creds(
+            control,
+            key_name=key_name,
+            namespace=namespace,
+            secret_name=secret_name,
+            buckets=bucket_list,
+        )
 
     console.print()
-    console.print(f"[green]✓[/green] Provisioned [cyan]{app_name}[/cyan]:")
-    for bucket in bucket_list:
-        console.print(f"    bucket  [cyan]{bucket}[/cyan]  (RW+owner)")
-    console.print(f"    key     [cyan]{key_name}[/cyan]")
-    console.print(f"    secret  [cyan]{namespace}/{secret_name}[/cyan]")
+    console.print(f"[green]✓[/green] App provisioning complete for namespace [cyan]{namespace}[/cyan].")
 
 
 if __name__ == "__main__":
