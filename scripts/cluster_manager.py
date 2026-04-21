@@ -72,9 +72,17 @@ def _ssh(control: str, cmd: str, *, capture: bool = False, check: bool = False) 
 
 
 def _kubectl(control: str, *args: str, capture: bool = False, check: bool = False) -> subprocess.CompletedProcess:
-    """Run kubectl on the control node via SSH (list args, no shell injection risk)."""
+    """Run kubectl on the control node via SSH.
+
+    Each arg is shlex-quoted before being handed to ssh. Without this, args
+    containing spaces / quotes / braces (e.g., a JSON patch for `kubectl patch
+    -p <json>`) get re-tokenized by the remote shell — ssh concatenates argv
+    with spaces into a single command line, which the remote shell then word-
+    splits. Plain values like `-n` or a namespace name are unaffected since
+    shlex.quote is a no-op for shell-safe strings.
+    """
     return subprocess.run(
-        ["ssh", control, "sudo", "k3s", "kubectl", *args],
+        ["ssh", control, "sudo", "k3s", "kubectl", *(shlex.quote(a) for a in args)],
         capture_output=capture, text=capture, check=check,
     )
 
