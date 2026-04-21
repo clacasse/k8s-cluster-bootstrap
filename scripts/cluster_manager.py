@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import json
 import re
 import shlex
 import subprocess
@@ -1148,16 +1149,20 @@ def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
     """Return every private-apps registration on the cluster.
 
     Discovers via the `cluster-manager/private-apps=true` label on AppProject.
-    For each one, pulls repoURL + sync/health from the matching Application and
-    the Repository Secret's URL for cross-check.
+    For each one, pulls repoURL + sync/health from the matching Application.
     """
     proj_result = _kubectl(
         control, "-n", "argocd", "get", "appproject",
         "-l", f"{PRIVATE_APPS_MANAGED_LABEL}=true",
-        "-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}",
+        "-o", "name",
         capture=True,
     )
-    names = [n for n in (proj_result.stdout or "").strip().splitlines() if n]
+    # kubectl -o name returns "appproject.argoproj.io/<name>" per line.
+    names = [
+        line.split("/", 1)[-1]
+        for line in (proj_result.stdout or "").strip().splitlines()
+        if line
+    ]
 
     entries: list[dict[str, str]] = []
     for name in names:
@@ -1280,8 +1285,14 @@ def private_apps_setup(
     typer.prompt("Press Enter once the deploy key is added", default="", show_default=False)
 
     # 3. Repository Secret (labeled so `list` can find us).
+    #
+    # json.dumps() produces a properly quoted YAML string value — critical
+    # here because git SSH URLs (git@host:path) contain a colon that plain-
+    # scalar YAML parsers can misinterpret as a mapping separator.
     secret_name = f"{project_name}-repo"
     indented_key = "\n".join("    " + line for line in private_key.splitlines())
+    url_yaml = json.dumps(repo_url)
+    project_yaml = json.dumps(project_name)
     repo_secret = f"""\
 apiVersion: v1
 kind: Secret
@@ -1291,11 +1302,11 @@ metadata:
   labels:
     argocd.argoproj.io/secret-type: repository
     {PRIVATE_APPS_MANAGED_LABEL}: "true"
-    cluster-manager/private-apps-project: {project_name}
+    cluster-manager/private-apps-project: {project_yaml}
 stringData:
   type: git
-  url: {repo_url}
-  project: {project_name}
+  url: {url_yaml}
+  project: {project_yaml}
   sshPrivateKey: |
 {indented_key}
 """
@@ -1311,7 +1322,7 @@ metadata:
   namespace: argocd
   labels:
     {PRIVATE_APPS_MANAGED_LABEL}: "true"
-    cluster-manager/private-apps-project: {project_name}
+    cluster-manager/private-apps-project: {project_yaml}
 spec:
   description: Private apps repository ({project_name})
   sourceRepos:
@@ -1338,11 +1349,11 @@ metadata:
   namespace: argocd
   labels:
     {PRIVATE_APPS_MANAGED_LABEL}: "true"
-    cluster-manager/private-apps-project: {project_name}
+    cluster-manager/private-apps-project: {project_yaml}
 spec:
   project: {project_name}
   source:
-    repoURL: {repo_url}
+    repoURL: {url_yaml}
     targetRevision: HEAD
     path: apps
     directory:
