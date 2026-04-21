@@ -1166,18 +1166,27 @@ def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
 
     entries: list[dict[str, str]] = []
     for name in names:
+        # Literal `|` between the three jsonpath expressions (outside {}),
+        # then split in Python. Using `{'|'}` inside jsonpath doesn't work
+        # across kubectl versions; double-quoted `{"|"}` does but plain
+        # literal chars are simpler.
         app_result = _kubectl(
             control, "-n", "argocd", "get", "application", f"{name}-root",
+            "--ignore-not-found",
             "-o",
-            "jsonpath={.spec.source.repoURL}{'|'}{.status.sync.status}{'|'}{.status.health.status}",
-            "--ignore-not-found", capture=True,
+            "jsonpath={.spec.source.repoURL}|{.status.sync.status}|{.status.health.status}",
+            capture=True,
         )
-        if not app_result.stdout:
+        stdout = (app_result.stdout or "").strip()
+        if not stdout:
+            entries.append({
+                "project": name, "repo_url": "?", "sync": "Unknown", "health": "Unknown",
+            })
             continue
-        parts = (app_result.stdout.split("|") + ["", "", ""])[:3]
+        parts = (stdout.split("|") + ["", "", ""])[:3]
         entries.append({
             "project": name,
-            "repo_url": parts[0],
+            "repo_url": parts[0] or "?",
             "sync": parts[1] or "Unknown",
             "health": parts[2] or "Unknown",
         })
