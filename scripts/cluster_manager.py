@@ -1885,21 +1885,26 @@ data:
     _apply_yaml(control, secret_yaml)
 
     # Invariant: what we applied came back intact — the registry host round-trips
-    # through base64 decoding of .dockerconfigjson.
+    # through base64 decoding of .dockerconfigjson. Use -o json + Python parse
+    # (not jsonpath) because the key `.dockerconfigjson` starts with a dot and
+    # the backslash-escape needed in jsonpath gets eaten by the remote shell
+    # when we go through SSH.
     r = _kubectl(
         control, "-n", namespace, "get", "secret", secret_name,
-        "-o", "jsonpath={.data.\\.dockerconfigjson}",
-        capture=True, check=True,
+        "-o", "json", capture=True, check=True,
     )
     try:
-        stored = base64.b64decode((r.stdout or "").strip()).decode()
-    except (ValueError, UnicodeDecodeError):
+        secret_obj = json.loads(r.stdout or "{}")
+        stored_b64 = (secret_obj.get("data") or {}).get(".dockerconfigjson", "")
+        stored = base64.b64decode(stored_b64).decode() if stored_b64 else ""
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
         stored = ""
     if registry not in stored:
         console.print(
             f"[red]invariant: stored dockerconfigjson for {namespace}/{secret_name} "
             f"does not contain registry {registry!r}[/red]"
         )
+        console.print(f"[red]    stored: {stored!r}[/red]")
         raise typer.Exit(1)
 
     if patch_default_sa:
