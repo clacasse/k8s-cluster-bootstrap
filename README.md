@@ -222,7 +222,7 @@ Change it immediately after first login.
 
 ### Register a private apps repo
 
-Argo CD can watch a second repository alongside your instance repo — a private one for applications you don't want in the (public) instance repo. Use this for anything you wouldn't share: personal projects, credentials-adjacent tooling, commercial apps.
+Argo CD can watch one or more private repositories alongside your instance repo — for applications you don't want in the (public) instance repo. Each private repo gets its own Argo CD AppProject, Repository Secret, root Application, and SSH deploy key; they coexist without interfering.
 
 ```bash
 # 1. Scaffold a starter private apps repo on disk.
@@ -233,22 +233,44 @@ cd ~/my-apps
 git init && git add . && git commit -m "Initial scaffold"
 gh repo create my-apps --private --source . --push
 
-# 3. Register it with the cluster. Generates an ed25519 deploy key, prompts
-#    you to add the public key to the repo, then creates the Argo CD
+# 3. Register it with the cluster. Generates a per-project ed25519 deploy key,
+#    prompts you to add the public key to the repo, then creates the Argo CD
 #    Repository Secret + AppProject + root Application.
+#
+#    Project name is derived from the repo URL by default — in this example
+#    it becomes "my-apps". Override with --project-name if you want.
 ./scripts/cluster_manager.py private-apps setup \
     --repo-url git@github.com:you/my-apps.git
 ```
 
 Afterwards, anything you commit under `apps/<name>/` in the private repo is picked up by Argo automatically. Each `apps/<name>/` can either be raw manifests OR a child Argo Application pointing elsewhere (e.g. a separate repo with a Helm chart). See the scaffold's `README.md` for both patterns.
 
-To remove:
+List what's registered:
 
 ```bash
-./scripts/cluster_manager.py private-apps unregister
+./scripts/cluster_manager.py private-apps list
 ```
 
-(Does not delete the deploy key on your git host — remove that via the UI.)
+Outputs a table with project name, repo URL, and Argo sync/health status.
+
+Remove one:
+
+```bash
+./scripts/cluster_manager.py private-apps unregister --project-name my-apps
+```
+
+(Does not delete the SSH key on disk or the deploy key on your git host — remove those manually if no longer needed.)
+
+#### Multiple private repos
+
+Register as many as you want — one setup invocation per repo:
+
+```bash
+./scripts/cluster_manager.py private-apps setup --repo-url git@github.com:you/homelab-apps.git
+./scripts/cluster_manager.py private-apps setup --repo-url git@github.com:you/work-apps.git
+```
+
+Setup refuses if a project with the same derived (or explicit) name already points at a different URL, and lists current registrations so you can pick a different `--project-name` or unregister the conflicting one first.
 
 ### Connect Slack (optional)
 

@@ -1129,6 +1129,56 @@ def _apply_yaml(control: str, yaml_text: str) -> None:
     )
 
 
+PRIVATE_APPS_MANAGED_LABEL = "cluster-manager/private-apps"
+
+
+def _derive_project_name(repo_url: str) -> str:
+    """Derive a project name from a git SSH URL.
+
+    git@github.com:clacasse/fieldstone-private-apps.git  →  fieldstone-private-apps
+    ssh://git@host/org/repo.git                          →  repo
+    """
+    match = re.search(r"[:/]([^/]+?)(?:\.git)?/?$", repo_url)
+    if not match:
+        raise ValueError(f"can't derive project name from {repo_url!r}")
+    return match.group(1)
+
+
+def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
+    """Return every private-apps registration on the cluster.
+
+    Discovers via the `cluster-manager/private-apps=true` label on AppProject.
+    For each one, pulls repoURL + sync/health from the matching Application and
+    the Repository Secret's URL for cross-check.
+    """
+    proj_result = _kubectl(
+        control, "-n", "argocd", "get", "appproject",
+        "-l", f"{PRIVATE_APPS_MANAGED_LABEL}=true",
+        "-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}",
+        capture=True,
+    )
+    names = [n for n in (proj_result.stdout or "").strip().splitlines() if n]
+
+    entries: list[dict[str, str]] = []
+    for name in names:
+        app_result = _kubectl(
+            control, "-n", "argocd", "get", "application", f"{name}-root",
+            "-o",
+            "jsonpath={.spec.source.repoURL}{'|'}{.status.sync.status}{'|'}{.status.health.status}",
+            "--ignore-not-found", capture=True,
+        )
+        if not app_result.stdout:
+            continue
+        parts = (app_result.stdout.split("|") + ["", "", ""])[:3]
+        entries.append({
+            "project": name,
+            "repo_url": parts[0],
+            "sync": parts[1] or "Unknown",
+            "health": parts[2] or "Unknown",
+        })
+    return entries
+
+
 @private_apps_app.command("scaffold")
 def private_apps_scaffold(
     path: Path = typer.Argument(..., help="Directory to create for the new private apps repo."),
@@ -1158,17 +1208,22 @@ def private_apps_setup(
         help="Path for the Argo CD SSH deploy key. Default: ~/.ssh/argocd-<project>.key",
     ),
     project_name: str = typer.Option(
-        "private-apps", "--project-name",
-        help="Argo CD AppProject name. Default: private-apps.",
+        None, "--project-name",
+        help="Argo CD AppProject name. Default: derived from the repo URL (e.g. "
+             "git@github.com:you/my-apps.git → 'my-apps').",
     ),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
     """Register a private apps repo with Argo CD.
 
-    Generates an SSH deploy key, prompts you to add the public key to the repo,
-    then applies three manifests to the cluster: a Repository Secret, an
-    AppProject, and a root app-of-apps Application that watches <repo>/apps.
-    Idempotent — safe to re-run.
+    Generates a per-project SSH deploy key, prompts you to add the public key to
+    the repo, then applies three labeled manifests: Repository Secret, AppProject,
+    and a root app-of-apps Application watching <repo>/apps. Multiple private
+    repos can coexist — each gets its own project + key.
+
+    Collision check: if an existing project of the same name points at a
+    different repo URL, we refuse and list current registrations so you can
+    pick a different --project-name or unregister the conflicting one first.
     """
     if not re.match(r"^(git@|ssh://)", repo_url):
         console.print(f"[red]--repo-url must be SSH (git@... or ssh://...). Got: {repo_url}[/red]")
@@ -1176,6 +1231,22 @@ def private_apps_setup(
 
     if control is None:
         control = _get_control_host()
+
+    if project_name is None:
+        project_name = _derive_project_name(repo_url)
+        console.print(f"  [dim]Derived project name: [cyan]{project_name}[/cyan][/dim]")
+
+    # Collision check.
+    existing = _list_private_apps_projects(control)
+    for entry in existing:
+        if entry["project"] == project_name and entry["repo_url"] not in ("", repo_url):
+            console.print(
+                f"[red]Project [cyan]{project_name}[/cyan] already exists pointing at "
+                f"{entry['repo_url']}.[/red]"
+            )
+            console.print("Either pick a different --project-name, or unregister first:")
+            console.print(f"  cluster_manager.py private-apps unregister --project-name {project_name}")
+            raise typer.Exit(1)
 
     if ssh_key_path is None:
         ssh_key_path = Path.home() / ".ssh" / f"argocd-{project_name}.key"
@@ -1203,11 +1274,12 @@ def private_apps_setup(
     console.print()
     console.print(f"  [cyan]{pub_key}[/cyan]")
     console.print()
-    console.print(f"  GitHub UI: {repo_url.replace('git@github.com:', 'https://github.com/').replace('.git', '')}/settings/keys/new")
+    gh_url = repo_url.replace('git@github.com:', 'https://github.com/').replace('.git', '')
+    console.print(f"  GitHub UI: {gh_url}/settings/keys/new")
     console.print()
     typer.prompt("Press Enter once the deploy key is added", default="", show_default=False)
 
-    # 3. Repository Secret
+    # 3. Repository Secret (labeled so `list` can find us).
     secret_name = f"{project_name}-repo"
     indented_key = "\n".join("    " + line for line in private_key.splitlines())
     repo_secret = f"""\
@@ -1218,6 +1290,8 @@ metadata:
   namespace: argocd
   labels:
     argocd.argoproj.io/secret-type: repository
+    {PRIVATE_APPS_MANAGED_LABEL}: "true"
+    cluster-manager/private-apps-project: {project_name}
 stringData:
   type: git
   url: {repo_url}
@@ -1235,8 +1309,11 @@ kind: AppProject
 metadata:
   name: {project_name}
   namespace: argocd
+  labels:
+    {PRIVATE_APPS_MANAGED_LABEL}: "true"
+    cluster-manager/private-apps-project: {project_name}
 spec:
-  description: Private apps repository
+  description: Private apps repository ({project_name})
   sourceRepos:
     - '*'
   destinations:
@@ -1259,6 +1336,9 @@ kind: Application
 metadata:
   name: {project_name}-root
   namespace: argocd
+  labels:
+    {PRIVATE_APPS_MANAGED_LABEL}: "true"
+    cluster-manager/private-apps-project: {project_name}
 spec:
   project: {project_name}
   source:
@@ -1281,18 +1361,59 @@ spec:
     _apply_yaml(control, root_app)
 
     console.print()
-    console.print(f"[green]✓[/green] Private apps repo [cyan]{repo_url}[/cyan] registered with Argo CD.")
+    console.print(
+        f"[green]✓[/green] Registered [cyan]{project_name}[/cyan] → {repo_url}"
+    )
     console.print(f"  Commit anything under [cyan]apps/[/cyan] and Argo will sync it.")
+    console.print(f"  Inspect: cluster_manager.py private-apps list")
+
+
+@private_apps_app.command("list")
+def private_apps_list(
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Show every private apps repo currently registered with Argo CD."""
+    if control is None:
+        control = _get_control_host()
+
+    entries = _list_private_apps_projects(control)
+    if not entries:
+        console.print("[dim]No private apps projects registered.[/dim]")
+        return
+
+    name_w = max(len("PROJECT"), max(len(e["project"]) for e in entries))
+    url_w = max(len("REPO URL"), max(len(e["repo_url"]) for e in entries))
+    console.print(f"[bold]{'PROJECT'.ljust(name_w)}  {'REPO URL'.ljust(url_w)}  SYNC     HEALTH[/bold]")
+    for e in entries:
+        console.print(
+            f"{e['project'].ljust(name_w)}  {e['repo_url'].ljust(url_w)}  "
+            f"{e['sync'].ljust(7)}  {e['health']}"
+        )
 
 
 @private_apps_app.command("unregister")
 def private_apps_unregister(
-    project_name: str = typer.Option("private-apps", "--project-name"),
+    project_name: str = typer.Option(..., "--project-name",
+                                      help="Project to tear down (see `private-apps list`)."),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
-    """Remove the Argo CD Application, AppProject, and Repository Secret for a private apps repo."""
+    """Remove the Argo CD Application, AppProject, and Repository Secret for a
+    private apps project. Does NOT delete the SSH key on disk or the deploy key
+    on the git host — remove those manually if you no longer need them.
+    """
     if control is None:
         control = _get_control_host()
+
+    existing = _list_private_apps_projects(control)
+    names = [e["project"] for e in existing]
+    if project_name not in names:
+        if not names:
+            console.print(f"[red]No private apps projects registered. Nothing to do.[/red]")
+        else:
+            console.print(f"[red]No project named [cyan]{project_name}[/cyan]. Did you mean one of:[/red]")
+            for n in names:
+                console.print(f"  {n}")
+        raise typer.Exit(1)
 
     for kind, name in [
         ("application", f"{project_name}-root"),
@@ -1304,7 +1425,8 @@ def private_apps_unregister(
 
     console.print()
     console.print(f"[green]✓[/green] Unregistered private apps project '{project_name}'.")
-    console.print("[dim]Reminder: remove the deploy key from your private repo via the git host UI.[/dim]")
+    console.print(f"[dim]Reminder: remove the deploy key on your git host if no longer needed.[/dim]")
+    console.print(f"[dim]SSH key ~/.ssh/argocd-{project_name}.key left on disk for safety — delete manually if unwanted.[/dim]")
 
 
 if __name__ == "__main__":
