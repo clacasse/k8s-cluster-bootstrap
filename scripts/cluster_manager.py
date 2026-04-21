@@ -1509,5 +1509,235 @@ def private_apps_unregister(
     console.print(f"[dim]SSH key ~/.ssh/argocd-{project_name}.key left on disk for safety — delete manually if unwanted.[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# Generic repo-secret registration (for child Argo Applications that reference
+# additional private repos beyond the root private-apps repo).
+# ---------------------------------------------------------------------------
+
+def _ensure_ssh_deploy_key(ssh_key_path: Path | None, name: str) -> tuple[Path, str, str]:
+    """Generate (or reuse) an ed25519 deploy keypair for Argo.
+
+    Returns (path, pub_key, private_key). Keypair lives at
+    ~/.ssh/argocd-<name>.{,.pub} unless an explicit path is supplied.
+    """
+    if ssh_key_path is None:
+        ssh_key_path = Path.home() / ".ssh" / f"argocd-{name}.key"
+    pub_key_path = ssh_key_path.with_suffix(ssh_key_path.suffix + ".pub")
+
+    if not ssh_key_path.exists():
+        ssh_key_path.parent.mkdir(mode=0o700, exist_ok=True)
+        console.print(f"Generating SSH deploy key at [cyan]{ssh_key_path}[/cyan]")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "",
+             "-C", f"argocd-{name}@{_get_repo_url().rsplit('/', 1)[-1]}",
+             "-f", str(ssh_key_path)],
+            check=True,
+        )
+    else:
+        console.print(f"  [dim]Reusing existing key at {ssh_key_path}[/dim]")
+
+    return ssh_key_path, pub_key_path.read_text().strip(), ssh_key_path.read_text()
+
+
+def _prompt_for_deploy_key(pub_key: str, repo_url: str) -> None:
+    """Print the public key + where to add it, then block on Enter."""
+    console.print()
+    console.print("[bold]Add this as a deploy key (read-only) on your repo:[/bold]")
+    console.print()
+    console.print(f"  [cyan]{pub_key}[/cyan]")
+    console.print()
+    gh_url = repo_url.replace("git@github.com:", "https://github.com/").replace(".git", "")
+    console.print(f"  GitHub UI: {gh_url}/settings/keys/new")
+    console.print()
+    typer.prompt("Press Enter once the deploy key is added", default="", show_default=False)
+
+
+@app.command("add-repo-secret")
+def add_repo_secret(
+    repo_url: str = typer.Option(..., "--repo-url", help="SSH URL of the repo to register."),
+    ssh_key_path: Path = typer.Option(
+        None, "--ssh-key-path",
+        help="Path for the SSH deploy key. Default: ~/.ssh/argocd-<name>.key",
+    ),
+    name: str = typer.Option(
+        None, "--name",
+        help="Repository Secret name. Default: <repo-slug>-repo.",
+    ),
+    project: str = typer.Option(
+        "*", "--project",
+        help="Argo AppProject that may use this repo. Default: * (any).",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Register a git repository with Argo CD as a Repository Secret.
+
+    Use this when a child Argo Application needs to clone a private repo
+    besides the root private-apps repo — e.g., a private application repo
+    whose Helm chart is deployed from a separate location.
+
+    Generates an SSH deploy key, prompts you to add the public key to the
+    repo, then applies the Argo Repository Secret. Argo picks the matching
+    Secret automatically based on URL when a child Application references it.
+    """
+    if not re.match(r"^(git@[\w.\-]+:.+|ssh://.+)$", repo_url):
+        console.print(f"[red]--repo-url must be 'git@HOST:PATH' or 'ssh://...'. Got: {repo_url!r}[/red]")
+        raise typer.Exit(1)
+
+    if control is None:
+        control = _get_control_host()
+
+    if name is None:
+        name = f"{_derive_project_name(repo_url)}-repo"
+        console.print(f"  [dim]Derived Secret name: [cyan]{name}[/cyan][/dim]")
+
+    _, pub_key, private_key = _ensure_ssh_deploy_key(ssh_key_path, name.removesuffix("-repo"))
+    _prompt_for_deploy_key(pub_key, repo_url)
+
+    indented_key = "\n".join("    " + line for line in private_key.splitlines())
+    url_yaml = json.dumps(repo_url)
+    project_yaml = json.dumps(project)
+    repo_secret = f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: {name}
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+    cluster-manager/repo-secret: "true"
+stringData:
+  type: git
+  url: {url_yaml}
+  project: {project_yaml}
+  sshPrivateKey: |
+{indented_key}
+"""
+    console.print(f"Applying Repository Secret [cyan]{name}[/cyan]")
+    _apply_yaml(control, repo_secret)
+    _assert_stored_secret_field(
+        control, namespace="argocd", name=name,
+        field="url", expected=repo_url, context="Repository Secret",
+    )
+
+    console.print()
+    console.print(
+        f"[green]✓[/green] Registered repo [cyan]{repo_url}[/cyan] as "
+        f"Secret [cyan]{name}[/cyan] (project [cyan]{project}[/cyan])."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Garage S3 provisioning — buckets + access key + k8s Secret for an app.
+# ---------------------------------------------------------------------------
+
+_KEY_ID_RE = re.compile(r"Key ID:\s*(\S+)")
+_SECRET_RE = re.compile(r"Secret key:\s*(\S+)")
+
+
+def _parse_garage_key_info(stdout: str) -> tuple[str, str]:
+    key_match = _KEY_ID_RE.search(stdout)
+    sec_match = _SECRET_RE.search(stdout)
+    if not key_match or not sec_match:
+        raise RuntimeError(
+            f"Could not parse key ID / secret from `garage key info --show-secret` output:\n{stdout}"
+        )
+    return key_match.group(1), sec_match.group(1)
+
+
+@app.command("provision-s3-app")
+def provision_s3_app(
+    app_name: str = typer.Option(..., "--app", help="App name. Used for key name and default Secret name."),
+    namespace: str = typer.Option(..., "--namespace", "-n", help="Target namespace for the k8s Secret."),
+    buckets: str = typer.Option(..., "--buckets", help="Comma-separated bucket names."),
+    secret_name: str = typer.Option(
+        None, "--secret-name",
+        help="k8s Secret name for the generated credentials. Default: <app>-s3",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Provision Garage buckets + access key for an app, then write the
+    credentials into a k8s Secret in the target namespace.
+
+    Idempotent: buckets that exist are reused, a key with the same name is
+    reused (its secret is re-read via `--show-secret` and the k8s Secret
+    gets the latest values).
+
+    The resulting Secret has two keys — `accessKeyId` and `secretAccessKey` —
+    matching what the DealSignal chart (and most S3-consuming charts) expect.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    if secret_name is None:
+        secret_name = f"{app_name}-s3"
+
+    bucket_list = [b.strip() for b in buckets.split(",") if b.strip()]
+    if not bucket_list:
+        console.print("[red]--buckets is empty[/red]")
+        raise typer.Exit(1)
+
+    key_name = f"{app_name}-key"
+
+    _ensure_namespace(control, namespace)
+
+    # 1. Buckets (idempotent).
+    for bucket in bucket_list:
+        console.print(f"Ensuring bucket [cyan]{bucket}[/cyan]")
+        r = _kubectl(
+            control, "-n", "garage", "exec", "garage-0", "--",
+            "/garage", "bucket", "create", bucket, capture=True,
+        )
+        combined = (r.stderr or "") + (r.stdout or "")
+        if r.returncode != 0 and "already exists" not in combined.lower():
+            console.print(f"[red]bucket create failed: {combined.strip()}[/red]")
+            raise typer.Exit(1)
+
+    # 2. Key (idempotent).
+    console.print(f"Ensuring access key [cyan]{key_name}[/cyan]")
+    r = _kubectl(
+        control, "-n", "garage", "exec", "garage-0", "--",
+        "/garage", "key", "create", key_name, capture=True,
+    )
+    combined = (r.stderr or "") + (r.stdout or "")
+    if r.returncode != 0 and "already exists" not in combined.lower():
+        console.print(f"[red]key create failed: {combined.strip()}[/red]")
+        raise typer.Exit(1)
+
+    # 3. Grant read+write+owner on each bucket. Idempotent.
+    for bucket in bucket_list:
+        _kubectl(
+            control, "-n", "garage", "exec", "garage-0", "--",
+            "/garage", "bucket", "allow",
+            "--read", "--write", "--owner",
+            "--key", key_name, bucket, check=True,
+        )
+
+    # 4. Read the key's secret back.
+    r = _kubectl(
+        control, "-n", "garage", "exec", "garage-0", "--",
+        "/garage", "key", "info", key_name, "--show-secret",
+        capture=True, check=True,
+    )
+    access_key_id, secret_access_key = _parse_garage_key_info(r.stdout or "")
+
+    # 5. Create/update the k8s Secret (idempotent via dry-run + apply).
+    console.print(f"Writing Secret [cyan]{namespace}/{secret_name}[/cyan]")
+    _ssh(
+        control,
+        f"sudo k3s kubectl -n {_q(namespace)} create secret generic {_q(secret_name)}"
+        f" --from-literal=accessKeyId={_q(access_key_id)}"
+        f" --from-literal=secretAccessKey={_q(secret_access_key)}"
+        f" --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+        check=True,
+    )
+
+    console.print()
+    console.print(f"[green]✓[/green] Provisioned [cyan]{app_name}[/cyan]:")
+    for bucket in bucket_list:
+        console.print(f"    bucket  [cyan]{bucket}[/cyan]  (RW+owner)")
+    console.print(f"    key     [cyan]{key_name}[/cyan]")
+    console.print(f"    secret  [cyan]{namespace}/{secret_name}[/cyan]")
+
+
 if __name__ == "__main__":
     app()
