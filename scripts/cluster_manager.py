@@ -1688,6 +1688,7 @@ def add_repo_secret(
 
 _KEY_ID_RE = re.compile(r"Key ID:\s*(\S+)")
 _SECRET_RE = re.compile(r"Secret key:\s*(\S+)")
+_KEY_LIST_LINE_RE = re.compile(r"^\s*(GK\S+)\s+(\S+)\s*$")
 
 
 def _parse_garage_key_info(stdout: str) -> tuple[str, str]:
@@ -1700,6 +1701,24 @@ def _parse_garage_key_info(stdout: str) -> tuple[str, str]:
     return key_match.group(1), sec_match.group(1)
 
 
+def _garage_list_keys(control: str) -> list[tuple[str, str]]:
+    """Return [(access_key_id, name), ...] parsed from `garage key list`.
+
+    Garage allows duplicate key names, so we always use the access-key ID for
+    disambiguation once we've picked which key to work with.
+    """
+    r = _kubectl(
+        control, "-n", "garage", "exec", "garage-0", "--",
+        "/garage", "key", "list", capture=True, check=True,
+    )
+    keys: list[tuple[str, str]] = []
+    for line in (r.stdout or "").splitlines():
+        m = _KEY_LIST_LINE_RE.match(line)
+        if m:
+            keys.append((m.group(1), m.group(2)))
+    return keys
+
+
 def _provision_s3_app_creds(
     control: str,
     *,
@@ -1710,9 +1729,12 @@ def _provision_s3_app_creds(
 ) -> None:
     """Provision Garage buckets + access key + k8s Secret. Idempotent.
 
-    Buckets that exist are reused. A key with `key_name` is reused; its secret
-    is re-read via `--show-secret` so the k8s Secret always reflects the live
-    credential. The resulting Secret exposes `accessKeyId` / `secretAccessKey`.
+    Buckets that exist are reused. A key named `key_name` is looked up by name
+    first (Garage allows duplicate names, so we list + filter rather than
+    trusting `key create` to be a no-op). If exactly one exists, we reuse its
+    access-key ID; if zero, we create one; if >1, we fail loudly with cleanup
+    commands rather than pick an arbitrary duplicate. After that point every
+    `--key` reference uses the ID, not the name, so ambiguity can't resurface.
     """
     _ensure_namespace(control, namespace)
 
@@ -1727,27 +1749,48 @@ def _provision_s3_app_creds(
             console.print(f"[red]bucket create failed: {combined.strip()}[/red]")
             raise typer.Exit(1)
 
-    console.print(f"Ensuring access key [cyan]{key_name}[/cyan]")
-    r = _kubectl(
-        control, "-n", "garage", "exec", "garage-0", "--",
-        "/garage", "key", "create", key_name, capture=True,
-    )
-    combined = (r.stderr or "") + (r.stdout or "")
-    if r.returncode != 0 and "already exists" not in combined.lower():
-        console.print(f"[red]key create failed: {combined.strip()}[/red]")
+    matching = [(kid, kname) for (kid, kname) in _garage_list_keys(control) if kname == key_name]
+    if len(matching) > 1:
+        console.print(
+            f"[red]Garage has {len(matching)} keys named [cyan]{key_name}[/cyan]. "
+            "Delete the extras before re-running (they can't all be the one the Secret points to):[/red]"
+        )
+        for kid, _ in matching:
+            console.print(
+                f"  sudo k3s kubectl -n garage exec garage-0 -- /garage key delete --yes {kid}"
+            )
+        console.print(
+            "[dim]If none of those IDs are attached to buckets yet, it's safe to delete all of them — "
+            "the next app-provision run will create a fresh single key.[/dim]"
+        )
         raise typer.Exit(1)
+
+    if not matching:
+        console.print(f"Creating access key [cyan]{key_name}[/cyan]")
+        _kubectl(
+            control, "-n", "garage", "exec", "garage-0", "--",
+            "/garage", "key", "create", key_name, check=True,
+        )
+        matching = [(kid, kname) for (kid, kname) in _garage_list_keys(control) if kname == key_name]
+        if len(matching) != 1:
+            console.print(f"[red]Expected exactly one key named {key_name} after create, got {len(matching)}[/red]")
+            raise typer.Exit(1)
+    else:
+        console.print(f"  [dim]Reusing existing key [cyan]{matching[0][0]}[/cyan] named [cyan]{key_name}[/cyan][/dim]")
+
+    key_id = matching[0][0]
 
     for bucket in buckets:
         _kubectl(
             control, "-n", "garage", "exec", "garage-0", "--",
             "/garage", "bucket", "allow",
             "--read", "--write", "--owner",
-            "--key", key_name, bucket, check=True,
+            "--key", key_id, bucket, check=True,
         )
 
     r = _kubectl(
         control, "-n", "garage", "exec", "garage-0", "--",
-        "/garage", "key", "info", key_name, "--show-secret",
+        "/garage", "key", "info", key_id, "--show-secret",
         capture=True, check=True,
     )
     access_key_id, secret_access_key = _parse_garage_key_info(r.stdout or "")
