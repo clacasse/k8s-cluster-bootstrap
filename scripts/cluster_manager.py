@@ -27,6 +27,7 @@ from pathlib import Path
 
 try:
     import typer
+    import yaml
     from rich.console import Console
 except ImportError:
     print("Missing dependencies. Install with:")
@@ -2028,11 +2029,6 @@ def _resolve_manifest_path(path: Path) -> Path:
 
 
 def _load_provision_spec(path: Path) -> dict:
-    try:
-        import yaml
-    except ImportError:
-        console.print("[red]pyyaml is required for app-provision. Install with: pip install -r requirements.txt[/red]")
-        raise typer.Exit(1)
     try:
         spec = yaml.safe_load(path.read_text())
     except yaml.YAMLError as e:
