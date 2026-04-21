@@ -1194,6 +1194,52 @@ def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
     return entries
 
 
+def _assert_stored_secret_field(
+    control: str, *, namespace: str, name: str, field: str, expected: str, context: str,
+) -> None:
+    """Read a stringData field back out of a just-applied Secret and verify the
+    stored value matches the submitted value. Secrets store stringData as
+    base64 in .data — decode before compare.
+
+    Fails the whole command with a loud diagnostic if they differ. This
+    catches the class of bugs where something between our apply and the
+    stored bytes (admission webhook, YAML parser quirk, silent rewrite)
+    mangles the value.
+    """
+    result = _kubectl(
+        control, "-n", namespace, "get", "secret", name,
+        "-o", f"jsonpath={{.data.{field}}}",
+        capture=True, check=True,
+    )
+    raw = (result.stdout or "").strip()
+    if not raw:
+        console.print(f"[red]Could not read back {context}/{name} field {field!r}[/red]")
+        raise typer.Exit(2)
+    stored = base64.b64decode(raw).decode()
+    if stored != expected:
+        console.print(f"[red]Invariant violation: {context}/{name} stored {field} ≠ submitted[/red]")
+        console.print(f"  submitted: {expected!r}")
+        console.print(f"  stored:    {stored!r}")
+        raise typer.Exit(2)
+
+
+def _assert_stored_app_field(
+    control: str, *, namespace: str, name: str, jsonpath: str, expected: str, context: str,
+) -> None:
+    """Same invariant check for non-Secret resources (no base64 decode)."""
+    result = _kubectl(
+        control, "-n", namespace, "get", "application", name,
+        "-o", f"jsonpath={jsonpath}",
+        capture=True, check=True,
+    )
+    stored = (result.stdout or "").strip()
+    if stored != expected:
+        console.print(f"[red]Invariant violation: {context}/{name} stored {jsonpath} ≠ submitted[/red]")
+        console.print(f"  submitted: {expected!r}")
+        console.print(f"  stored:    {stored!r}")
+        raise typer.Exit(2)
+
+
 @private_apps_app.command("scaffold")
 def private_apps_scaffold(
     path: Path = typer.Argument(..., help="Directory to create for the new private apps repo."),
@@ -1240,8 +1286,12 @@ def private_apps_setup(
     different repo URL, we refuse and list current registrations so you can
     pick a different --project-name or unregister the conflicting one first.
     """
-    if not re.match(r"^(git@|ssh://)", repo_url):
-        console.print(f"[red]--repo-url must be SSH (git@... or ssh://...). Got: {repo_url}[/red]")
+    # Shape invariant: the scp-like form must have a colon after the host
+    # (git@HOST:PATH), or the URL must be an explicit ssh:// URL. This catches
+    # args like "git@github.com/owner/repo" where the colon was already lost
+    # by some upstream step.
+    if not re.match(r"^(git@[\w.\-]+:.+|ssh://.+)$", repo_url):
+        console.print(f"[red]--repo-url must be 'git@HOST:PATH' or 'ssh://...'. Got: {repo_url!r}[/red]")
         raise typer.Exit(1)
 
     if control is None:
@@ -1322,6 +1372,10 @@ stringData:
 """
     console.print(f"Applying Repository Secret [cyan]{secret_name}[/cyan]")
     _apply_yaml(control, repo_secret)
+    _assert_stored_secret_field(
+        control, namespace="argocd", name=secret_name,
+        field="url", expected=repo_url, context="Secret",
+    )
 
     # 4. AppProject
     app_project = f"""\
@@ -1380,6 +1434,11 @@ spec:
 """
     console.print(f"Applying root Application [cyan]{project_name}-root[/cyan]")
     _apply_yaml(control, root_app)
+    _assert_stored_app_field(
+        control, namespace="argocd", name=f"{project_name}-root",
+        jsonpath="{.spec.source.repoURL}", expected=repo_url,
+        context="Application",
+    )
 
     console.print()
     console.print(
