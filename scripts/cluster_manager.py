@@ -1166,15 +1166,14 @@ def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
 
     entries: list[dict[str, str]] = []
     for name in names:
-        # Literal `|` between the three jsonpath expressions (outside {}),
-        # then split in Python. Using `{'|'}` inside jsonpath doesn't work
-        # across kubectl versions; double-quoted `{"|"}` does but plain
-        # literal chars are simpler.
+        # Read the Application as JSON and parse in Python. Using `-o jsonpath`
+        # with a `|` separator doesn't survive: `_kubectl` passes args to
+        # `ssh host arg1 arg2...`, SSH joins them with spaces into a single
+        # remote-shell command, and the shell interprets `|` as a pipe
+        # operator — swallowing kubectl's output.
         app_result = _kubectl(
             control, "-n", "argocd", "get", "application", f"{name}-root",
-            "--ignore-not-found",
-            "-o",
-            "jsonpath={.spec.source.repoURL}|{.status.sync.status}|{.status.health.status}",
+            "--ignore-not-found", "-o", "json",
             capture=True,
         )
         stdout = (app_result.stdout or "").strip()
@@ -1183,12 +1182,14 @@ def _list_private_apps_projects(control: str) -> list[dict[str, str]]:
                 "project": name, "repo_url": "?", "sync": "Unknown", "health": "Unknown",
             })
             continue
-        parts = (stdout.split("|") + ["", "", ""])[:3]
+        data = json.loads(stdout)
+        spec_source = data.get("spec", {}).get("source", {}) or {}
+        status = data.get("status", {}) or {}
         entries.append({
             "project": name,
-            "repo_url": parts[0] or "?",
-            "sync": parts[1] or "Unknown",
-            "health": parts[2] or "Unknown",
+            "repo_url": spec_source.get("repoURL") or "?",
+            "sync": (status.get("sync") or {}).get("status") or "Unknown",
+            "health": (status.get("health") or {}).get("status") or "Unknown",
         })
     return entries
 
