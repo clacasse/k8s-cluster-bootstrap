@@ -16,12 +16,40 @@ spec:
     spec:
       initContainers:
         - name: write-config
-          image: busybox
+          # alpine (not busybox) so we can install jq for merging MCP
+          # overrides. The merge lets downstream forks register extra MCP
+          # servers — e.g., private apps — without forking this file.
+          image: alpine:3.20
           command:
             - sh
             - -c
             - |
+              set -e
+              apk add --no-cache jq >/dev/null
+
               MODEL_ID="${ACTIVE_MODEL:-gemma4:26b}"
+
+              # Base MCP servers shipped with this public deployment.
+              BASE_MCP_SERVERS='{
+                "vault-search": {
+                  "url": "http://rag-mcp.openclaw.svc.cluster.local:8080/sse",
+                  "transport": "sse"
+                }
+              }'
+
+              # Optional per-cluster overrides. Any fork / private-apps repo
+              # creates a ConfigMap named `openclaw-mcp-extra` in this
+              # namespace with a `servers.json` key containing a JSON object
+              # of additional `{name: {url, transport, ...}}` entries. The
+              # ConfigMap volume mounts optional, so pods start cleanly when
+              # there's no override.
+              if [ -f /mcp-extra/servers.json ] && [ -s /mcp-extra/servers.json ]; then
+                MCP_SERVERS=$(echo "${BASE_MCP_SERVERS}" \
+                    | jq -c --argjson extra "$(cat /mcp-extra/servers.json)" '. + $extra')
+              else
+                MCP_SERVERS=$(echo "${BASE_MCP_SERVERS}" | jq -c .)
+              fi
+
               cat > /data/openclaw.json <<CONF
               {
                 "gateway": {
@@ -63,12 +91,7 @@ spec:
                   }
                 },
                 "mcp": {
-                  "servers": {
-                    "vault-search": {
-                      "url": "http://rag-mcp.openclaw.svc.cluster.local:8080/sse",
-                      "transport": "sse"
-                    }
-                  }
+                  "servers": ${MCP_SERVERS}
                 }
               }
               CONF
@@ -91,6 +114,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: mcp-extra
+              mountPath: /mcp-extra
+              readOnly: true
       containers:
         - name: openclaw
           image: ghcr.io/openclaw/openclaw:2026.4.14
@@ -160,3 +186,7 @@ spec:
         - name: vault
           persistentVolumeClaim:
             claimName: obsidian-vault
+        - name: mcp-extra
+          configMap:
+            name: openclaw-mcp-extra
+            optional: true
