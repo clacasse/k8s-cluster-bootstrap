@@ -87,7 +87,10 @@ spec:
                     "model": {
                       "primary": "ollama/${MODEL_ID}"
                     },
-                    "workspace": "/vault"
+                    "workspace": "/vault",
+                    "compaction": {
+                      "reserveTokensFloor": 32000
+                    }
                   }
                 },
                 "mcp": {
