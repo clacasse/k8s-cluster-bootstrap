@@ -158,18 +158,31 @@ spec:
                   name: openclaw-secrets
                   key: telegram-bot-token
                   optional: true
+          # OpenClaw's Node.js event loop is single-threaded; during startup
+          # it fetches model pricing from OpenRouter + LiteLLM (each a 30s
+          # HTTP call to the internet) and that can delay /healthz and
+          # /readyz responses past the default 1-second probe timeout.
+          # Default timeoutSeconds=1 + failureThreshold=3 meant one busy
+          # moment would trip "Readiness probe failed: context deadline
+          # exceeded" repeatedly and kubelet would kill the pod as
+          # Unhealthy. Widening the probes gives OpenClaw breathing room
+          # without sacrificing the "pod is actually wedged" detection.
           readinessProbe:
             httpGet:
               path: /readyz
               port: 18789
             initialDelaySeconds: 15
-            periodSeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: 18789
-            initialDelaySeconds: 60
+            initialDelaySeconds: 90
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             requests:
               cpu: 250m
