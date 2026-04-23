@@ -87,7 +87,6 @@ spec:
                     "model": {
                       "primary": "ollama/${MODEL_ID}"
                     },
-                    "runtime": "acp",
                     "workspace": "/vault",
                     "compaction": {
                       "reserveTokensFloor": 32000
