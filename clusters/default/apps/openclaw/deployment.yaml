@@ -87,6 +87,7 @@ spec:
                     "model": {
                       "primary": "ollama/${MODEL_ID}"
                     },
+                    "runtime": "acp",
                     "workspace": "/vault",
                     "compaction": {
                       "reserveTokensFloor": 32000
@@ -122,7 +123,7 @@ spec:
               readOnly: true
       containers:
         - name: openclaw
-          image: ghcr.io/openclaw/openclaw:2026.4.14
+          image: ghcr.io/openclaw/openclaw:2026.4.22-1
           ports:
             - name: http
               containerPort: 18789
