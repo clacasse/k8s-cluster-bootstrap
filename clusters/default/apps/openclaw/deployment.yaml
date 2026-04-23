@@ -158,6 +158,14 @@ spec:
                   name: openclaw-secrets
                   key: telegram-bot-token
                   optional: true
+            # Node.js defaults max-old-space-size to roughly half of the
+            # container's memory limit. With the 2026.4.22 release auto-
+            # enabling more plugins (browser, deepgram, elevenlabs, acpx),
+            # the 1Gi pod limit capped Node at ~512MB heap and it OOMed at
+            # startup. Give Node explicit room matching the raised pod
+            # limit below.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=2048"
           # OpenClaw's Node.js event loop is single-threaded; during startup
           # it fetches model pricing from OpenRouter + LiteLLM (each a 30s
           # HTTP call to the internet) and that can delay /healthz and
@@ -189,7 +197,7 @@ spec:
               memory: 512Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 3Gi
           volumeMounts:
             - name: data
               mountPath: /home/node/.openclaw
