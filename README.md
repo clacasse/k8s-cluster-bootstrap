@@ -1,14 +1,13 @@
 # k8s Cluster Bootstrap
 
-Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster running Ollama on the GPU, managed by Argo CD.
+Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster managed by Argo CD, ready to host an LLM inference server on the GPU node.
 
-> **LAN-only by design.** Ollama's API has no authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
+> **LAN-only by design.** In-cluster services (LLM inference, Ingress endpoints) don't carry their own authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
 
 ## What you get
 
 - **k3s** cluster: 1 server + N agents (no HA). Node roles: `control`, `worker`, `gpu`, `storage`.
 - **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `https://argocd.apps`
-- **Ollama** deployed to the GPU node with a persistent local-path PVC — at `https://ollama.apps`
 - **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases are installed by default
 - **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps create their own buckets and access keys
 - **Node Feature Discovery (NFD)** auto-labels nodes with hardware info (PCI devices, CPU features)
@@ -54,7 +53,7 @@ To pull upstream improvements into your instance later:
                                     LAN (router DNS)
 
                    *.apps  →  control node IP  (wildcard A record)
-                   AI workloads (Ollama) → GPU node
+                   AI workloads (LLM inference) → GPU node
                    Workspace synced via Obsidian Sync
 ```
 
@@ -181,7 +180,7 @@ Both commands are safe to re-run.
 ./scripts/cluster_manager.py status
 ```
 
-After `bootstrap` finishes, Argo CD reconciles Ollama, the NVIDIA device plugin, and its own Ingress — typically in under a minute. Watch:
+After `bootstrap` finishes, Argo CD reconciles the NVIDIA device plugin, its own Ingress, and other installed Applications — typically in under a minute. Watch:
 
 ```bash
 ssh k3s-control sudo k3s kubectl -n argocd get applications
@@ -331,10 +330,6 @@ Pure git workflow — no Ansible, no DNS:
 | `prep-node <ip> [--hostname H] [--role R]` | Add node to inventory, authorize SSH key, run prep playbook (apt upgrade, hostname, NVIDIA). |
 | `bootstrap` | Run `ansible/cluster.yml` against the whole inventory (k3s + Argo CD). |
 | `setup-secrets` | Generate TLS cert, OpenClaw token, Grafana password, and initial model selection. |
-| `models list` | Show pulled Ollama models and which is active. |
-| `models pull <tag>` | Pull a model into Ollama. |
-| `models set <tag>` | Set the active model for OpenClaw (restarts pod). |
-| `models remove <tag>` | Delete a model from Ollama. |
 | `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
 | `setup-telegram` | Configure Telegram bot token for OpenClaw. |
 | `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |
@@ -382,7 +377,6 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
         │   └── children/               # reconciled by root
         │       ├── cloudnative-pg.yaml  # CNPG operator (Helm; no Cluster CR)
         │       ├── garage.yaml          # Single-node Garage, pinned to storage node
-        │       ├── ollama.yaml
         │       ├── openclaw.yaml
         │       ├── obsidian-sync.yaml
         │       ├── kube-prometheus-stack.yaml
@@ -395,7 +389,6 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
             ├── argocd-ingress/
             ├── garage/                 # configmap + service + statefulset
             ├── obsidian-sync/          # Headless Obsidian Sync for workspace
-            ├── ollama/
             └── openclaw/
 ```
 
@@ -407,8 +400,7 @@ All pinned in `ansible/group_vars/all.yml`:
 |---|---|
 | k3s | `v1.35.3+k3s1` |
 | Argo CD | `v3.0.23` |
-| Ollama | `0.20.7` |
-| OpenClaw | `2026.4.14` |
+| OpenClaw | `2026.4.22` |
 | ChromaDB | `1.5.8` |
 | NVIDIA device plugin Helm chart | `0.17.4` |
 | Node Feature Discovery Helm chart | `0.18.3` |
@@ -425,7 +417,7 @@ Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 - **Unattended-upgrades on the GPU node can break `nvidia-smi`.** A kernel upgrade without a DKMS rebuild silently breaks GPU access. Re-run `prep-node <gpu-host>` — the `nvidia` role will reinstall drivers.
 - **local-path PVCs don't survive OS reinstall.** Reinstalling the GPU node's OS means re-pulling models. By design — treat the OS as ephemeral.
 - **Self-signed TLS cert.** `setup-secrets` generates a wildcard cert for `*.APPS_DOMAIN`. Your browser will show a warning on first visit — accept it once per browser.
-- **Ollama has no auth.** LAN only. See top-of-readme warning.
+- **In-cluster LLM inference has no auth.** LAN only. See top-of-readme warning.
 
 ## Key decisions
 
