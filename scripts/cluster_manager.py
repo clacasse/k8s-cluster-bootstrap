@@ -167,6 +167,25 @@ def _require_fork_initialized() -> None:
 
 
 def _get_repo_url() -> str:
+    """Repo URL in HTTPS form, .git stripped. Used for human-readable
+    citations + the deploy-key labels on private-apps secrets where a
+    short, URL-bar-pasteable form is wanted. For the actual URL Argo CD
+    will use to fetch git contents (which respects SSH vs HTTPS), use
+    `_get_repo_remote_url`.
+    """
+    url = _get_repo_remote_url()
+    if url.startswith("git@github.com:"):
+        url = "https://github.com/" + url[len("git@github.com:"):]
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url
+
+
+def _get_repo_remote_url() -> str:
+    """Raw `git remote get-url origin` value — preserves SSH or HTTPS as
+    the operator configured it. This is the URL Argo CD writes to its
+    Application sources.
+    """
     result = subprocess.run(
         ["git", "config", "--get", "remote.origin.url"],
         capture_output=True, text=True, cwd=REPO_DIR,
@@ -174,12 +193,127 @@ def _get_repo_url() -> str:
     if result.returncode != 0 or not result.stdout.strip():
         console.print("[red]Could not detect git remote origin.[/red]")
         raise typer.Exit(1)
-    url = result.stdout.strip()
-    if url.startswith("git@github.com:"):
-        url = "https://github.com/" + url[len("git@github.com:"):]
-    if url.endswith(".git"):
-        url = url[:-4]
-    return url
+    return result.stdout.strip()
+
+
+def _is_ssh_url(url: str) -> bool:
+    """True for git@host:path form. Argo CD authenticates SSH URLs with a
+    Repository Secret holding an ed25519 deploy key; HTTPS URLs to public
+    repos need no secret at all."""
+    return url.startswith("git@")
+
+
+def _instance_repo_name(url: str) -> str:
+    """Last path segment of a git URL, .git stripped. Used to derive a
+    short, filesystem-safe identifier for the instance repo's deploy key.
+
+    git@github.com:user/foo.git              -> foo
+    https://github.com/user/foo              -> foo
+    https://github.com/user/foo.git          -> foo
+    """
+    m = re.search(r"[:/]([^/:]+?)(?:\.git)?/?$", url)
+    if not m:
+        raise ValueError(f"can't derive repo name from {url!r}")
+    return m.group(1)
+
+
+def _instance_repo_key_path(url: str) -> Path:
+    """Conventional path for the instance repo's Argo deploy key.
+    Lives under ~/.ssh so it never gets committed; the public key gets
+    pasted into GitHub's deploy keys UI; the private key gets baked
+    into the Argo Repository Secret.
+    """
+    return Path.home() / ".ssh" / f"argocd-instance-{_instance_repo_name(url)}.key"
+
+
+def _detect_current_repo_url() -> str | None:
+    """Read the repoURL the manifests currently target. Returns None if
+    init-fork hasn't run yet (REPO_URL placeholder still present).
+    """
+    root_path = CLUSTERS_DIR / "default" / "applications" / "root.yaml"
+    if not root_path.exists():
+        return None
+    m = re.search(r"^\s*repoURL:\s+(\S.+?)\s*$", root_path.read_text(), re.MULTILINE)
+    if not m:
+        return None
+    url = m.group(1)
+    return None if url == "REPO_URL" else url
+
+
+def _ensure_instance_deploy_key_and_prompt(repo_url: str) -> Path:
+    """Generate the ed25519 deploy keypair for the instance repo (if it
+    doesn't exist already) and prompt the operator to add the public key
+    as a deploy key on the GitHub repo. Returns the private key path.
+
+    Idempotent: skips key generation if the file is already there. The
+    prompt for adding to GitHub still fires so re-runs after a manual
+    repo move surface the public key again.
+    """
+    key_path = _instance_repo_key_path(repo_url)
+    pub_path = key_path.with_suffix(key_path.suffix + ".pub")
+
+    if not key_path.exists():
+        key_path.parent.mkdir(mode=0o700, exist_ok=True)
+        console.print(f"\nGenerating SSH deploy key at [cyan]{key_path}[/cyan]")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "",
+             "-C", f"argocd-instance-{_instance_repo_name(repo_url)}",
+             "-f", str(key_path)],
+            check=True,
+        )
+    else:
+        console.print(f"\n  [dim]Reusing existing SSH deploy key at {key_path}[/dim]")
+
+    pub_key = pub_path.read_text().strip()
+    console.print()
+    console.print("[bold]Add this public key as a deploy key (read-only) on your instance repo:[/bold]")
+    console.print()
+    console.print(f"  [cyan]{pub_key}[/cyan]")
+    console.print()
+    if repo_url.startswith("git@github.com:"):
+        # git@github.com:user/repo.git -> https://github.com/user/repo/settings/keys/new
+        path = repo_url.split(":", 1)[1]
+        if path.endswith(".git"):
+            path = path[:-4]
+        console.print(f"  GitHub UI: https://github.com/{path}/settings/keys/new")
+    console.print()
+    console.print(
+        "[dim]After adding the deploy key, run this once the cluster is bootstrapped:\n"
+        "    cluster_manager.py setup-instance-repo\n"
+        "to apply the matching Argo Repository Secret.[/dim]"
+    )
+    return key_path
+
+
+def _apply_instance_repo_secret(control: str, repo_url: str, key_path: Path) -> None:
+    """Apply the Argo Repository Secret for the instance repo. Idempotent.
+    Used both at first private-instance bootstrap and after a public→private
+    conversion.
+    """
+    private_key = key_path.read_text()
+    indented_key = "\n".join("    " + line for line in private_key.splitlines())
+    url_yaml = json.dumps(repo_url)
+    secret_yaml = f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: instance-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+    cluster-manager/instance-repo: "true"
+stringData:
+  type: git
+  url: {url_yaml}
+  sshPrivateKey: |
+{indented_key}
+"""
+    console.print(f"Applying Repository Secret [cyan]instance-repo[/cyan] for {repo_url}")
+    _apply_yaml(control, secret_yaml)
+    _assert_stored_secret_field(
+        control, namespace="argocd", name="instance-repo",
+        field="url", expected=repo_url, context="instance Repository Secret",
+    )
 
 
 def _get_apps_domain() -> str:
@@ -284,7 +418,7 @@ def _add_to_inventory(inv: Path, hostname: str, ip: str, role: str, user: str) -
 @app.command("init-fork")
 def init_fork(
     repo_url: str = typer.Argument(
-        None, help="Explicit repo URL. Defaults to `git remote get-url origin`."
+        None, help="Explicit repo URL (HTTPS or SSH). Defaults to `git remote get-url origin`.",
     ),
     apps_domain: str = typer.Option(
         DEFAULT_APPS_DOMAIN,
@@ -293,9 +427,22 @@ def init_fork(
              "*.<domain> A record you created on your router.",
     ),
 ) -> None:
-    """One-time: rewrite REPO_URL, APPS_DOMAIN, and NFS_SERVER placeholders in cluster manifests."""
+    """Initialize / re-initialize repoURL + APPS_DOMAIN substitution.
+
+    First run on a fresh fork replaces the `REPO_URL` placeholder. Re-run
+    after changing your repo's location (e.g. flipping public→private with
+    a new SSH URL) to rewrite every `repoURL:` line to the new value —
+    detection is automatic via the existing repoURL value in root.yaml.
+
+    If the URL is SSH (`git@host:user/repo.git`), also generates an
+    ed25519 deploy keypair at ~/.ssh/argocd-instance-<repo>.key and
+    prompts you to add the public key as a deploy key on the repo.
+    The Argo Repository Secret pairing that key with the URL is applied
+    in a separate step — `setup-instance-repo` — that needs the cluster
+    to exist.
+    """
     if repo_url is None:
-        repo_url = _get_repo_url()
+        repo_url = _get_repo_remote_url()
 
     if apps_domain == DEFAULT_APPS_DOMAIN:
         apps_domain = typer.prompt(
@@ -313,10 +460,28 @@ def init_fork(
     if nfs_server != "none":
         console.print(f"Setting NFS server to:  [cyan]{nfs_server}[/cyan]")
 
-    replacements = {
-        "repoURL: REPO_URL": f"repoURL: {repo_url}",
-        "APPS_DOMAIN": apps_domain,
-    }
+    # Detect prior repoURL (if init-fork was already run). Driven from the
+    # root Argo Application — its repoURL is what Argo actually uses.
+    # If it's still the placeholder, this is a first init; otherwise we're
+    # converting from one URL to another (e.g., HTTPS -> SSH for going
+    # private). The replacement step rewrites every `repoURL: <prior>`
+    # match to the new URL — sibling repos referenced in the manifests
+    # (e.g. a deal-signal chart Application pointing at a different repo)
+    # are NOT touched because their repoURL line doesn't equal the prior.
+    prior_url = _detect_current_repo_url()
+    if prior_url is None:
+        # First-init: just substitute the placeholder.
+        repo_url_replacements = {"repoURL: REPO_URL": f"repoURL: {repo_url}"}
+    elif prior_url == repo_url:
+        # Already initialized at this URL; no-op for the URL part.
+        repo_url_replacements = {}
+        console.print(f"  [dim](repoURL is already {repo_url})[/dim]")
+    else:
+        # Conversion: rewrite the prior URL everywhere.
+        console.print(f"  Converting from prior repoURL: [yellow]{prior_url}[/yellow]")
+        repo_url_replacements = {f"repoURL: {prior_url}": f"repoURL: {repo_url}"}
+
+    replacements = {**repo_url_replacements, "APPS_DOMAIN": apps_domain}
     if nfs_server != "none":
         replacements["NFS_SERVER"] = nfs_server
 
@@ -330,6 +495,9 @@ def init_fork(
             yaml_path.write_text(new_text)
             touched += 1
             console.print(f"  [green]✓[/green] {yaml_path.relative_to(REPO_DIR)}")
+
+    if _is_ssh_url(repo_url):
+        _ensure_instance_deploy_key_and_prompt(repo_url)
 
     if touched == 0:
         console.print("[yellow]No placeholders found. Already initialized?[/yellow]")
@@ -592,6 +760,76 @@ def _get_control_host() -> str:
             return line.split()[0]
     console.print("[red]No [control] host found in inventory.[/red]")
     raise typer.Exit(1)
+
+
+@app.command("setup-instance-repo")
+def setup_instance_repo(
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Wire Argo CD up to a private instance repo via SSH deploy key.
+
+    Reads the repoURL from clusters/{cluster}/applications/root.yaml,
+    confirms it's an SSH URL, and:
+      1. Applies an Argo Repository Secret pairing that URL with the
+         private key from ~/.ssh/argocd-instance-<repo>.key (generated
+         by `init-fork` when the URL is SSH).
+      2. Patches the live `root` Argo Application to use the URL — so
+         conversion from public to private takes effect immediately,
+         not only after the next sync of root.yaml itself.
+
+    Idempotent: re-run any time, e.g. after rotating the deploy key
+    or moving the instance repo to a new URL.
+
+    No-op (with a friendly message) when the repoURL is HTTPS — public
+    repos don't need a Repository Secret.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    repo_url = _detect_current_repo_url()
+    if repo_url is None:
+        console.print(
+            "[red]No initialized repoURL found in clusters/.[/red] Run "
+            "[cyan]init-fork[/cyan] first."
+        )
+        raise typer.Exit(1)
+
+    if not _is_ssh_url(repo_url):
+        console.print(
+            f"[dim]repoURL [cyan]{repo_url}[/cyan] is HTTPS — no Repository "
+            f"Secret needed. (To switch to SSH/private, change your git "
+            f"remote, run init-fork, then re-run this.)[/dim]"
+        )
+        return
+
+    key_path = _instance_repo_key_path(repo_url)
+    if not key_path.exists():
+        console.print(
+            f"[red]No deploy key at {key_path}.[/red] Run "
+            f"[cyan]init-fork[/cyan] to generate it (it's safe to re-run)."
+        )
+        raise typer.Exit(1)
+
+    _apply_instance_repo_secret(control, repo_url, key_path)
+
+    # Patch the live root Application's repoURL so a conversion takes
+    # effect immediately. After git push of the rewritten root.yaml,
+    # Argo would pick this up anyway — but doing it here means the
+    # Secret + URL pair becomes consistent in one CLI invocation.
+    patch = {"spec": {"source": {"repoURL": repo_url}}}
+    _kubectl(
+        control, "-n", "argocd", "patch", "application", "root",
+        "--type", "merge", "-p", json.dumps(patch),
+        check=False,
+    )
+    console.print(
+        f"[green]Done.[/green] Argo's root Application now points at "
+        f"[cyan]{repo_url}[/cyan]. Push your manifest changes when ready, "
+        "and the rest of the apps follow."
+    )
 
 
 @app.command("setup-secrets")
