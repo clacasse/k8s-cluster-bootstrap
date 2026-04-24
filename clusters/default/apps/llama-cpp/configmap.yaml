@@ -14,21 +14,26 @@ metadata:
   name: llama-cpp-config
 data:
   # --- Chat model ---
-  # Qwen3-14B-Instruct at Q5_K_M: ~10.5 GB of weights, fits fully on the
-  # RTX 5080 (16 GB). Architecture: 40 transformer layers, hidden=5120,
+  # Qwen3-14B-Instruct at Q5_K_M: ~9.5 GB of weights, fits fully on the
+  # RTX 5080 (16 GB). Architecture: 41 transformer layers, hidden=5120,
   # 40 attn heads / 8 KV heads (GQA 5:1). No CPU offload needed.
   #
-  # VRAM budget at 64k ctx, all layers on GPU:
-  #   Model weights (Q5_K_M)      ≈ 10.5 GB
-  #   CUDA0 KV cache (64k, q8_0)  ≈ 3.0 GB
-  #   Compute buffer + frag       ≈ 0.8 GB
-  #   ─────────────────────────   ─ ~14.3 GB (leaves ~2 GB headroom)
+  # VRAM budget at 32k ctx, all layers on GPU (measured from startup log):
+  #   Model weights (Q5_K_M)      ≈  9.5 GB
+  #   CUDA0 KV cache (32k, q8_0)  ≈  2.7 GB
+  #   Compute buffer + frag       ≈  0.8 GB
+  #   ─────────────────────────   ─ ~13.0 GB (leaves ~3.3 GB headroom)
   #
-  # 64k context chosen for room to breathe in long agent sessions with
-  # multi-tool orchestration — the compactor builds prompts up to ~25-27k
-  # tokens on busy sessions and 32k was cutting it too close. If the
-  # CUDA0 KV buffer at load time overshoots ~3 GB, drop CHAT_CTX_SIZE
-  # back to 32768 — the model itself fits with huge margin at either.
+  # Why 32k not 64k:
+  # - Qwen3-14B was trained at 32k native context (n_ctx_train=32768).
+  #   Going past that uses RoPE scaling and can measurably degrade
+  #   long-context quality — not worth it.
+  # - Qwen3-14B has 8 KV heads (vs qwen3.6-27B's 4), so its KV cache
+  #   grows twice as fast per ctx-token. 64k was viable on the 27B but
+  #   pinned the 14B to ~15.6 GB used with only 224 MB free.
+  # - OpenClaw's long-session compaction prompts top out around 25-27k
+  #   tokens, which fits cleanly in 32k with 5-7k of headroom for the
+  #   summary response.
   #
   # Speed: expect ~80 tok/s generation, ~500-1000 tok/s prompt
   # processing on the 5080 at Q5_K_M all-GPU. Dramatic improvement over
@@ -40,7 +45,7 @@ data:
   # this matched with the model id in openclaw.json + the openclaw-model
   # ConfigMap's active-model key (imperatively managed, not in git).
   CHAT_SERVED_MODEL: "qwen3-14b"
-  CHAT_CTX_SIZE: "65536"
+  CHAT_CTX_SIZE: "32768"
   # -ngl 999 = "all layers on GPU" (llama-server clamps to actual layer
   # count). No -t flag needed since CPU isn't in the inference path.
   CHAT_EXTRA_FLAGS: "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja"
