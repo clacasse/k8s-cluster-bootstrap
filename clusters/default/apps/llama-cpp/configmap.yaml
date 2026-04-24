@@ -24,8 +24,10 @@ data:
   CHAT_SERVED_MODEL: "qwen3-14b"
   CHAT_CTX_SIZE: "32768"
   # Flash-attention + quantized KV cache halves memory used by long contexts
-  # and doesn't measurably hurt quality on Qwen3 at Q5.
-  CHAT_EXTRA_FLAGS: "-ngl 999 -fa -ctk q8_0 -ctv q8_0 --metrics --jinja"
+  # and doesn't measurably hurt quality on Qwen3 at Q5. Note: in recent
+  # llama.cpp builds `-fa` takes an argument (on|off|auto) — bare `-fa`
+  # grabs the next flag as its value and errors out.
+  CHAT_EXTRA_FLAGS: "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja"
 
   # --- Embedding model ---
   # nomic-embed-text-v1.5 is 768-dim, same as the old Ollama pull. The
