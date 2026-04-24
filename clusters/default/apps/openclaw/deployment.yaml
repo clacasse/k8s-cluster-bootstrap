@@ -35,6 +35,13 @@ spec:
               # a served model.
               MODEL_ID="${ACTIVE_MODEL:-qwen3-14b}"
 
+              # Note on provider "api" values: OpenClaw rejects anything
+              # outside its enum of driver names ("openai-completions",
+              # "openai-responses", "anthropic-messages", "ollama", ...)
+              # and falls back to last-known-good config. llama.cpp
+              # speaks the classic Chat Completions endpoint, so
+              # "openai-completions" is the right choice — NOT "openai".
+
               # Base MCP servers shipped with this public deployment.
               BASE_MCP_SERVERS='{
                 "vault-search": {
@@ -73,7 +80,7 @@ spec:
                   "providers": {
                     "openai": {
                       "baseUrl": "http://llama-chat.llama-cpp.svc.cluster.local:8080/v1",
-                      "api": "openai",
+                      "api": "openai-completions",
                       "models": [
                         {
                           "id": "${MODEL_ID}",
