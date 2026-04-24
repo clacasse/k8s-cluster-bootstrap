@@ -5,10 +5,25 @@
     k3s_join_token: "{{ hostvars[groups['control'][0]]['k3s_token'] }}"
   no_log: true
 
-- name: Check if k3s agent is installed
+- name: Check if k3s binary is present
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
   register: k3s_agent_binary
+
+# Version-aware re-install: see comment in k3s-server/tasks/main.yml.
+# Skipping on bare binary presence left nodes on stale k3s builds when
+# group_vars got bumped.
+- name: Detect installed k3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed_version_raw
+  changed_when: false
+  check_mode: false
+  when: k3s_agent_binary.stat.exists
+
+- name: Parse installed k3s version
+  ansible.builtin.set_fact:
+    k3s_installed_version: "{{ (k3s_installed_version_raw.stdout_lines[0] | default('')).split()[2] | default('') }}"
+  when: k3s_agent_binary.stat.exists
 
 # Node-role labels + taints so only workloads that opt in schedule on these nodes:
 #   - GPU: AI workloads (llama.cpp) tolerate nvidia.com/gpu=true
@@ -42,7 +57,7 @@
   when: inventory_hostname in groups['gpu']
   notify: Restart k3s-agent
 
-- name: Install k3s agent (pinned version)
+- name: Install or upgrade k3s agent
   ansible.builtin.shell: |
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="{{ k3s_version }}" \
@@ -50,7 +65,10 @@
       K3S_TOKEN="{{ k3s_join_token }}" \
       INSTALL_K3S_EXEC="{{ k3s_agent_exec | trim }}" \
       sh -
-  when: not k3s_agent_binary.stat.exists
+  # Runs when agent is missing OR when the pinned version doesn't match
+  # what's actually installed. The installer replaces /usr/local/bin/k3s
+  # in-place and restarts k3s-agent.
+  when: (not k3s_agent_binary.stat.exists) or (k3s_installed_version != k3s_version)
   changed_when: true
   no_log: true
 
