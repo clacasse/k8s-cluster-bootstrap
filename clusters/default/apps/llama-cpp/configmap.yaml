@@ -14,20 +14,37 @@ metadata:
   name: llama-cpp-config
 data:
   # --- Chat model ---
-  # Qwen3-14B-Instruct at Q5_K_M: ~10.5 GB weights, plus ~3 GB KV cache for
-  # 32k ctx at q8_0 = ~13.5 GB on-device. Fits an RTX 5080 (16 GB) with
-  # ~2 GB headroom for activations/CUDA workspace.
-  CHAT_MODEL_REPO: "bartowski/Qwen_Qwen3-14B-GGUF"
-  CHAT_MODEL_FILE: "Qwen_Qwen3-14B-Q5_K_M.gguf"
+  # Qwen3.6-27B-Instruct at Q4_K_M: ~16.8 GB of weights — doesn't fit all
+  # on the RTX 5080 (16 GB). Architecture from the GGUF metadata:
+  # 64 transformer layers, hidden=5120, 24 attn heads / 4 KV heads (GQA
+  # 6:1) — the small KV head count keeps the KV cache manageable even
+  # with partial CPU offload.
+  #
+  # VRAM budget with `-ngl 52` (52/64 layers on GPU):
+  #   52 layers × ~237 MB weight  ≈ 12.3 GB
+  #   LM head / output tensor     ≈ 0.5 GB
+  #   KV cache at 16k ctx q8_0    ≈ 0.8 GB
+  #   CUDA workspace / frag       ≈ 1.0 GB
+  #   ─────────────────────────   ─ ~14.6 GB (leaves ~1.4 GB headroom)
+  # The other 12 layers (~2.8 GB) live in system RAM and are stepped
+  # through on CPU for every token. 9800X3D at DDR5-6000 should land
+  # overall generation at ~20-30 tok/s vs ~80 tok/s all-GPU with 14B.
+  #
+  # To tune: watch `llm_load_tensors: offloaded N/64 layers` in the
+  # llama-server startup log, plus `CUDA0 buffer size = X MiB`. If the
+  # GPU buffer lands below ~13 GB, push ngl up; if it OOMs on load,
+  # push ngl down.
+  CHAT_MODEL_REPO: "unsloth/Qwen3.6-27B-GGUF"
+  CHAT_MODEL_FILE: "Qwen3.6-27B-Q4_K_M.gguf"
   # Name reported via /v1/models — OpenClaw picks an entry by id, so keep
   # this matched with the model id in openclaw.json.
-  CHAT_SERVED_MODEL: "qwen3-14b"
-  CHAT_CTX_SIZE: "32768"
-  # Flash-attention + quantized KV cache halves memory used by long contexts
-  # and doesn't measurably hurt quality on Qwen3 at Q5. Note: in recent
-  # llama.cpp builds `-fa` takes an argument (on|off|auto) — bare `-fa`
-  # grabs the next flag as its value and errors out.
-  CHAT_EXTRA_FLAGS: "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja"
+  CHAT_SERVED_MODEL: "qwen3.6-27b"
+  CHAT_CTX_SIZE: "16384"
+  # `-t 8` pins to the 9800X3D's 8 physical cores (all on the single
+  # cache-enabled CCD); over-threading onto SMT siblings causes cache
+  # thrash for CPU matmul. Flash-attention + q8_0 KV cache drop KV
+  # memory ~4x vs FP16 with no measurable quality hit on Qwen3.
+  CHAT_EXTRA_FLAGS: "-ngl 52 -t 8 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja"
 
   # --- Embedding model ---
   # nomic-embed-text-v1.5 is 768-dim, same as the old Ollama pull. The
