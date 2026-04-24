@@ -1,37 +1,51 @@
 # Template-level, Argo-managed llama.cpp defaults.
 #
-# This ConfigMap holds only the keys that do NOT vary per deployment:
-# the embedding model + its server flags. Changing the embedding model
-# invalidates the existing Chroma collection (different vector space)
-# so it's treated as a deliberate infrastructure change, not a runtime
-# knob — it lives here in git where a change requires a commit.
+# Holds sensible defaults for every tunable knob the llama-chat and
+# llama-embed deployments read via envFrom. Per-deployment overrides
+# live in a separate, imperatively-managed `llama-cpp-model` ConfigMap
+# written by `cluster_manager.py llama setup` / `llama set-*` / etc.
+# The pod's envFrom lists llama-cpp-model AFTER this one, so any key
+# set there wins. Keys NOT present in llama-cpp-model fall through to
+# the defaults below.
 #
-# The *chat* model is intentionally NOT here. Chat model choice is a
-# per-deployment operator decision — pinning a specific model in the
-# upstream template would force every fork to inherit one person's
-# taste and VRAM budget. Instead, chat config lives in a separate
-# ConfigMap `llama-cpp-model` that is created imperatively by
-# `cluster_manager.py llama setup`, and updated by `llama set-chat`.
-# That one is not reconciled by Argo, so runtime edits persist.
-#
-# The llama-chat deployment envFroms BOTH ConfigMaps, with
-# `llama-cpp-model` marked optional so a fresh cluster can boot the
-# llama-cpp Argo app before the operator has run `llama setup` —
-# the pod will then crashloop on missing CHAT_MODEL_FILE, which is
-# the intended signal that setup is required.
+# This lets the template ship reasonable behavior without prescribing
+# a specific model. A fresh fork boots, crashloops on the missing
+# CHAT_MODEL_FILE (intended signal), operator runs `llama setup` and
+# picks their model — all other knobs get the defaults from here
+# unless they override them too.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: llama-cpp-defaults
 data:
+  # --- Chat model defaults (operator MUST override CHAT_MODEL_*) ---
+  # The repo/file/alias keys are intentionally NOT defaulted — the
+  # template has no opinion about which chat model a given deployment
+  # runs. Operator sets these via `llama setup`.
+  # CHAT_MODEL_REPO   = must-set
+  # CHAT_MODEL_FILE   = must-set
+  # CHAT_SERVED_MODEL = must-set
+  #
+  # The remaining knobs get defaults that work for most 14-30B class
+  # models on a 16 GB-class consumer GPU. Tune via:
+  #   llama set-chat ... --ctx N --ngl N --kv-type TYPE --parallel N --flash-attn on|off|auto
+  #   llama set-ctx N  /  llama set-ngl N  /  llama set-kv-type TYPE  /  etc.
+  CHAT_CTX_SIZE: "32768"           # context window; safe inside 32k-native-trained models
+  CHAT_GPU_LAYERS: "999"           # 999 = "all on GPU"; llama-server clamps to actual layer count
+  CHAT_PARALLEL_SLOTS: "4"         # concurrent request slots; spread KV cache across them
+  CHAT_KV_TYPE: "q8_0"             # KV cache dtype; applied to both K and V
+  CHAT_FLASH_ATTN: "on"            # Blackwell/Ada have it; Ampere partial
+  CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
+
   # --- Embedding model ---
   # nomic-embed-text-v1.5 is 768-dim, same as the old Ollama pull. The
-  # existing Chroma collection's vectors are therefore compatible; we do
-  # NOT need to reindex the vault. Changing this value requires
+  # existing Chroma collection's vectors are therefore compatible; we
+  # do NOT need to reindex the vault. Changing embed dim requires
   # re-indexing — see `cluster_manager.py restart --wipe-rag`.
   EMBED_MODEL_REPO: "nomic-ai/nomic-embed-text-v1.5-GGUF"
   EMBED_MODEL_FILE: "nomic-embed-text-v1.5.Q8_0.gguf"
   EMBED_SERVED_MODEL: "nomic-embed-text"
-  # The nomic model trains at 2048; longer ctx is wasted and slows batching.
-  EMBED_CTX_SIZE: "2048"
-  EMBED_EXTRA_FLAGS: "--embeddings --metrics --pooling mean"
+  EMBED_CTX_SIZE: "2048"           # nomic trains at 2048; longer is wasted
+  EMBED_POOLING: "mean"            # mean / cls / last; nomic uses mean
+  EMBED_PARALLEL_SLOTS: "2"        # embed requests batch well, 2 is plenty
+  EMBED_EXTRA_FLAGS: ""

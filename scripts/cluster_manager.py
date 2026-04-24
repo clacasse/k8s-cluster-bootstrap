@@ -890,13 +890,68 @@ LLAMA_NS = "llama-cpp"
 LLAMA_DEFAULTS_CONFIGMAP = "llama-cpp-defaults"
 LLAMA_MODEL_CONFIGMAP = "llama-cpp-model"
 
-# Keys in llama-cpp-model that `llama setup` / `llama set-chat` mutate.
-# Source-of-truth for the chat model the deployment is serving.
-_LLAMA_CHAT_KEYS = ("CHAT_MODEL_REPO", "CHAT_MODEL_FILE", "CHAT_SERVED_MODEL")
+# Full set of chat knobs in llama-cpp-model. Every key has a default
+# in llama-cpp-defaults (git); what lives here is the operator's
+# overrides for THIS deployment. `llama setup` writes all of them on
+# first run; `llama set-chat` + the per-field setters patch subsets.
+#
+# Order in this list controls `llama setup` prompt order AND `llama list`
+# display order, so keep identity-ish keys (repo/file/alias) up top and
+# tunables below.
+_LLAMA_CHAT_KEYS = (
+    "CHAT_MODEL_REPO",
+    "CHAT_MODEL_FILE",
+    "CHAT_SERVED_MODEL",
+    "CHAT_CTX_SIZE",
+    "CHAT_GPU_LAYERS",
+    "CHAT_PARALLEL_SLOTS",
+    "CHAT_KV_TYPE",
+    "CHAT_FLASH_ATTN",
+    "CHAT_EXTRA_FLAGS",
+)
 # Keys in llama-cpp-defaults for the embed model. `llama set-embed`
 # edits llama-cpp-defaults in the live cluster — Argo will revert that
 # on the next sync, so for a durable change, edit the git file too.
 _LLAMA_EMBED_KEYS = ("EMBED_MODEL_REPO", "EMBED_MODEL_FILE", "EMBED_SERVED_MODEL")
+
+# Prompt labels for `llama setup`; same key order as _LLAMA_CHAT_KEYS.
+_LLAMA_CHAT_PROMPTS = {
+    "CHAT_MODEL_REPO":     "Chat model HuggingFace repo",
+    "CHAT_MODEL_FILE":     "Chat GGUF filename",
+    "CHAT_SERVED_MODEL":   "Served-as model id (advertised via /v1/models)",
+    "CHAT_CTX_SIZE":       "Context size (tokens)",
+    "CHAT_GPU_LAYERS":     "GPU layer offload (999 = all, lower = partial CPU offload)",
+    "CHAT_PARALLEL_SLOTS": "Parallel request slots",
+    "CHAT_KV_TYPE":        "KV cache quantization (q8_0 / q4_0 / q5_0 / f16)",
+    "CHAT_FLASH_ATTN":     "Flash attention (on / off / auto)",
+    "CHAT_EXTRA_FLAGS":    "Extra llama-server flags (optional)",
+}
+
+# Validation enums for knobs that take a fixed vocabulary. Reject early
+# with a specific error rather than letting llama-server crashloop on a
+# typo.
+_VALID_KV_TYPES = ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "f16", "f32")
+_VALID_FLASH_ATTN = ("on", "off", "auto")
+
+
+def _validate_chat_field(key: str, value: str) -> None:
+    """Raise typer.BadParameter on invalid values. Called by every
+    setter + by `llama setup` after each prompt."""
+    if key == "CHAT_KV_TYPE" and value not in _VALID_KV_TYPES:
+        raise typer.BadParameter(
+            f"CHAT_KV_TYPE must be one of {list(_VALID_KV_TYPES)}, got {value!r}"
+        )
+    if key == "CHAT_FLASH_ATTN" and value not in _VALID_FLASH_ATTN:
+        raise typer.BadParameter(
+            f"CHAT_FLASH_ATTN must be one of {list(_VALID_FLASH_ATTN)}, got {value!r}"
+        )
+    if key in ("CHAT_CTX_SIZE", "CHAT_GPU_LAYERS", "CHAT_PARALLEL_SLOTS"):
+        try:
+            n = int(value)
+        except ValueError as e:
+            raise typer.BadParameter(f"{key} must be an integer, got {value!r}") from e
+        if n < 0:
+            raise typer.BadParameter(f"{key} must be non-negative, got {n}")
 
 
 llama_app = typer.Typer(
@@ -975,22 +1030,46 @@ def llama_list(
             f"{LLAMA_MODEL_CONFIGMAP} (from `llama setup`)."
         )
         raise typer.Exit(1)
-    if not any(data.get(k) for k in _LLAMA_CHAT_KEYS):
+    if not data.get("CHAT_MODEL_FILE"):
         console.print(
             "[yellow]No chat model configured yet.[/yellow] "
             f"Run [cyan]cluster_manager.py llama setup[/cyan] to populate "
             f"{LLAMA_MODEL_CONFIGMAP}."
         )
 
-    def _line(role: str, keys: tuple[str, ...]) -> str:
-        repo = data.get(keys[0], "?")
-        fname = data.get(keys[1], "?")
-        served = data.get(keys[2], "?")
-        return f"  [bold]{role}[/bold]  [cyan]{repo}/{fname}[/cyan]  served as [green]{served}[/green]"
+    # Distinguish imperative (llama-cpp-model) from defaulted (llama-cpp-
+    # defaults) values — gives the operator a quick sense of which knobs
+    # they've explicitly set vs which are riding on template defaults.
+    model_cm = _kubectl(
+        control, "-n", LLAMA_NS, "get", "configmap", LLAMA_MODEL_CONFIGMAP,
+        "--ignore-not-found", "-o", "json", capture=True, check=False,
+    )
+    model_keys: set[str] = set()
+    if (model_cm.stdout or "").strip():
+        model_keys = set(json.loads(model_cm.stdout).get("data", {}).keys())
 
-    console.print("[bold]Active models:[/bold]")
-    console.print(_line("chat ", _LLAMA_CHAT_KEYS))
-    console.print(_line("embed", _LLAMA_EMBED_KEYS))
+    def _mark(key: str) -> str:
+        return "[green]set[/green]  " if key in model_keys else "[dim]default[/dim]  "
+
+    console.print(
+        f"[bold]Active chat model[/bold] "
+        f"[cyan]{data.get('CHAT_MODEL_REPO','?')}/{data.get('CHAT_MODEL_FILE','?')}[/cyan] "
+        f"served as [green]{data.get('CHAT_SERVED_MODEL','?')}[/green]"
+    )
+    console.print("[bold]Chat tunables:[/bold]")
+    for key in _LLAMA_CHAT_KEYS:
+        if key in ("CHAT_MODEL_REPO", "CHAT_MODEL_FILE", "CHAT_SERVED_MODEL"):
+            continue
+        val = data.get(key, "?")
+        display = val if val else "[dim](empty)[/dim]"
+        console.print(f"  {_mark(key)}{key} = {display}")
+
+    console.print(
+        f"\n[bold]Active embed model[/bold] "
+        f"[cyan]{data.get('EMBED_MODEL_REPO','?')}/{data.get('EMBED_MODEL_FILE','?')}[/cyan] "
+        f"served as [green]{data.get('EMBED_SERVED_MODEL','?')}[/green] "
+        f"[dim](edit via git — change requires vault reindex)[/dim]"
+    )
 
     for role in ("chat", "embed"):
         deploy = _llama_deployment_for(role)
@@ -1076,41 +1155,54 @@ def _apply_openclaw_active_model(control: str, served_as: str) -> None:
 
 # Defaults offered by `llama setup` on a fresh deployment. Sensible
 # for a 16 GB-class consumer GPU (5080, 4080, 3080/3090) running a 14B
-# chat model all on the card. Users with different hardware will be
-# prompted to override.
+# chat model all on the card. Values not in llama-cpp-defaults (repo/
+# file/alias) are prompted without a baseline suggestion; tunables
+# (ctx/ngl/etc.) fall back to the git defaults if the operator just
+# hits Enter.
 _LLAMA_SETUP_DEFAULTS = {
-    "CHAT_MODEL_REPO":   "bartowski/Qwen_Qwen3-14B-GGUF",
-    "CHAT_MODEL_FILE":   "Qwen_Qwen3-14B-Q5_K_M.gguf",
-    "CHAT_SERVED_MODEL": "qwen3-14b",
-    "CHAT_CTX_SIZE":     "32768",
-    "CHAT_EXTRA_FLAGS":  "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja",
+    "CHAT_MODEL_REPO":     "bartowski/Qwen_Qwen3-14B-GGUF",
+    "CHAT_MODEL_FILE":     "Qwen_Qwen3-14B-Q5_K_M.gguf",
+    "CHAT_SERVED_MODEL":   "qwen3-14b",
+    "CHAT_CTX_SIZE":       "32768",
+    "CHAT_GPU_LAYERS":     "999",
+    "CHAT_PARALLEL_SLOTS": "4",
+    "CHAT_KV_TYPE":        "q8_0",
+    "CHAT_FLASH_ATTN":     "on",
+    "CHAT_EXTRA_FLAGS":    "",
 }
 
 
 @llama_app.command("setup")
 def llama_setup(
-    repo: str = typer.Option(None, "--repo", help="HuggingFace repo for the chat GGUF."),
-    filename: str = typer.Option(None, "--file", help="GGUF filename inside the repo."),
-    served_as: str = typer.Option(None, "--served-as", help="Model id reported via /v1/models."),
-    ctx_size: str = typer.Option(None, "--ctx", help="Context size in tokens."),
+    repo: str = typer.Option(None, "--repo"),
+    filename: str = typer.Option(None, "--file"),
+    served_as: str = typer.Option(None, "--served-as"),
+    ctx: str = typer.Option(None, "--ctx", help="Context size in tokens."),
+    ngl: str = typer.Option(None, "--ngl", help="GPU layer offload count (999 = all)."),
+    parallel: str = typer.Option(None, "--parallel", help="Concurrent request slots."),
+    kv_type: str = typer.Option(None, "--kv-type", help=f"One of {list(_VALID_KV_TYPES)}."),
+    flash_attn: str = typer.Option(None, "--flash-attn", help=f"One of {list(_VALID_FLASH_ATTN)}."),
     extra_flags: str = typer.Option(None, "--flags", help="Extra llama-server flags."),
-    restart: bool = typer.Option(True, "--restart/--no-restart", help="Bounce llama-chat + openclaw pods after the write."),
-    force: bool = typer.Option(False, "--force", help="Re-prompt even for keys that are already set."),
+    restart: bool = typer.Option(True, "--restart/--no-restart"),
+    force: bool = typer.Option(False, "--force", help="Re-prompt for every key, even those already set."),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
     """First-time + reconfigure of the llama-chat model.
 
-    Writes TWO ConfigMaps, both imperatively managed (not in git, not
+    Writes two ConfigMaps, both imperatively managed (not in git, not
     reconciled by Argo):
       - llama-cpp/llama-cpp-model: CHAT_* env keys the llama-chat pod
-        reads via envFrom. What file to serve, ctx size, flags, alias.
+        reads via envFrom. Model repo/file/alias plus every tunable
+        (ctx, ngl, parallel, kv-type, flash-attn, extra flags).
       - openclaw/openclaw-model: active-model key interpolated into
-        openclaw.json so OpenClaw picks the same model-id the chat
-        server advertises under /v1/models.
+        openclaw.json so OpenClaw picks the same id the chat server
+        advertises under /v1/models.
 
-    Re-run any time you want to change the chat model. For a quick
-    one-arg swap between already-configured models, `llama set-chat`
-    is faster; `llama setup` is for the full reconfigure flow.
+    Prompts for every chat knob in order; Enter accepts the current
+    value (or default if unset). Pass CLI flags for any subset to skip
+    those prompts; pass --force to re-prompt even for keys already set.
+    For a single-knob tweak that doesn't need the full walk, use
+    `llama set-ctx`, `llama set-ngl`, `llama set-kv-type`, etc.
     """
     if control is None:
         control = _get_control_host()
@@ -1123,36 +1215,38 @@ def llama_setup(
     ).stdout.strip()
 
     cli_overrides = {
-        "CHAT_MODEL_REPO": repo,
-        "CHAT_MODEL_FILE": filename,
-        "CHAT_SERVED_MODEL": served_as,
-        "CHAT_CTX_SIZE": ctx_size,
-        "CHAT_EXTRA_FLAGS": extra_flags,
+        "CHAT_MODEL_REPO":     repo,
+        "CHAT_MODEL_FILE":     filename,
+        "CHAT_SERVED_MODEL":   served_as,
+        "CHAT_CTX_SIZE":       ctx,
+        "CHAT_GPU_LAYERS":     ngl,
+        "CHAT_PARALLEL_SLOTS": parallel,
+        "CHAT_KV_TYPE":        kv_type,
+        "CHAT_FLASH_ATTN":     flash_attn,
+        "CHAT_EXTRA_FLAGS":    extra_flags,
     }
 
-    def _resolve(key: str, label: str) -> str:
-        if cli_overrides[key]:
-            return cli_overrides[key]
-        current = existing.get(key)
-        # If the key is already set AND we're not in --force, skip the
-        # prompt and keep what's there. This makes re-runs with a single
-        # CLI override fast (only re-prompt for what's missing).
+    def _resolve(key: str) -> str:
+        override = cli_overrides.get(key)
+        if override is not None:
+            _validate_chat_field(key, override)
+            return override
+        current = existing.get(key, "")
+        # Already-set keys skipped unless --force; makes re-running with
+        # one CLI override fast (only missing keys prompt).
         if current and not force:
             return current
-        default = current or _LLAMA_SETUP_DEFAULTS[key]
-        return typer.prompt(label, default=default)
+        default = current or _LLAMA_SETUP_DEFAULTS.get(key, "")
+        answer = typer.prompt(_LLAMA_CHAT_PROMPTS[key], default=default)
+        _validate_chat_field(key, answer)
+        return answer
 
-    values = {
-        "CHAT_MODEL_REPO":   _resolve("CHAT_MODEL_REPO",   "Chat model HuggingFace repo"),
-        "CHAT_MODEL_FILE":   _resolve("CHAT_MODEL_FILE",   "Chat GGUF filename"),
-        "CHAT_SERVED_MODEL": _resolve("CHAT_SERVED_MODEL", "Served-as model id (advertised via /v1/models)"),
-        "CHAT_CTX_SIZE":     _resolve("CHAT_CTX_SIZE",     "Context size (tokens)"),
-        "CHAT_EXTRA_FLAGS":  _resolve("CHAT_EXTRA_FLAGS",  "llama-server extra flags"),
-    }
+    # Iterate in the canonical order so the prompts feel coherent.
+    values = {k: _resolve(k) for k in _LLAMA_CHAT_KEYS}
 
     console.print(f"\nWriting [cyan]{LLAMA_NS}/{LLAMA_MODEL_CONFIGMAP}[/cyan]:")
-    for k, v in values.items():
-        console.print(f"  {k}={v}")
+    for k in _LLAMA_CHAT_KEYS:
+        console.print(f"  {k}={values[k]}")
     _llama_patch_model_config(control, values)
 
     if existing_active != values["CHAT_SERVED_MODEL"]:
@@ -1173,23 +1267,153 @@ def llama_setup(
 @llama_app.command("set-chat")
 def llama_set_chat(
     repo: str = typer.Argument(..., help="HuggingFace repo, e.g. bartowski/Qwen_Qwen3-14B-GGUF"),
-    filename: str = typer.Argument(..., help="GGUF filename inside the repo, e.g. Qwen_Qwen3-14B-Q5_K_M.gguf"),
+    filename: str = typer.Argument(..., help="GGUF filename inside the repo."),
     served_as: str = typer.Option(
         None, "--served-as",
-        help="Name to expose via /v1/models (OpenClaw picks models by this id). "
-             "Defaults to keeping the current value.",
+        help="Id exposed via /v1/models (OpenClaw picks models by this id). "
+             "Keeps current value if omitted.",
     ),
+    ctx: str = typer.Option(None, "--ctx", help="Context size in tokens."),
+    ngl: str = typer.Option(None, "--ngl", help="GPU layer offload count (999 = all)."),
+    parallel: str = typer.Option(None, "--parallel", help="Concurrent request slots."),
+    kv_type: str = typer.Option(None, "--kv-type", help=f"One of {list(_VALID_KV_TYPES)}."),
+    flash_attn: str = typer.Option(None, "--flash-attn", help=f"One of {list(_VALID_FLASH_ATTN)}."),
+    flags: str = typer.Option(None, "--flags", help="Replace CHAT_EXTRA_FLAGS (escape hatch)."),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
-    """Quick swap: just the repo + filename (+ optional alias).
+    """Swap chat model and optionally tune knobs in one shot.
 
-    For the full reconfigure flow (ctx size, server flags) use
-    `llama setup` instead — this command only touches the model
-    repo/file/alias and keeps everything else at current values.
+    Required positional args — repo + filename — are what defines the
+    switch. Every `--<knob>` option is optional; anything omitted keeps
+    the current ConfigMap value. One write, one restart.
+
+    Examples:
+      # Pure model swap (uses current ctx/ngl/etc.)
+      llama set-chat unsloth/Qwen3-30B-A3B-GGUF Qwen3-30B-A3B-Q4_K_M.gguf
+
+      # Swap and retune for partial offload at longer context
+      llama set-chat <repo> <file> --ctx 16384 --ngl 52 --kv-type q4_0
     """
     if control is None:
         control = _get_control_host()
-    _llama_set(control, "chat", repo, filename, served_as)
+
+    # Build the patch from required + any --<knob>s that were given.
+    updates: dict[str, str] = {"CHAT_MODEL_REPO": repo, "CHAT_MODEL_FILE": filename}
+    opt_map = {
+        "CHAT_SERVED_MODEL":   served_as,
+        "CHAT_CTX_SIZE":       ctx,
+        "CHAT_GPU_LAYERS":     ngl,
+        "CHAT_PARALLEL_SLOTS": parallel,
+        "CHAT_KV_TYPE":        kv_type,
+        "CHAT_FLASH_ATTN":     flash_attn,
+        "CHAT_EXTRA_FLAGS":    flags,
+    }
+    for key, val in opt_map.items():
+        if val is not None:
+            _validate_chat_field(key, val)
+            updates[key] = val
+
+    console.print(f"Patching [cyan]{LLAMA_MODEL_CONFIGMAP}[/cyan]:")
+    for k, v in updates.items():
+        console.print(f"  {k}={v}")
+    _llama_patch_model_config(control, updates)
+    if "CHAT_SERVED_MODEL" in updates:
+        _apply_openclaw_active_model(control, updates["CHAT_SERVED_MODEL"])
+
+    console.print("Restarting [cyan]llama-chat[/cyan]")
+    _restart_deployment(control, LLAMA_NS, "llama-chat")
+    if "CHAT_SERVED_MODEL" in updates:
+        _restart_deployment(control, "openclaw", "openclaw")
+    console.print(
+        "[green]Done.[/green] Pod will download the GGUF (if not cached) and reload."
+    )
+
+
+def _llama_set_single(control: str, key: str, value: str) -> None:
+    """Shared path for the per-knob setters. Validate, patch, restart."""
+    _validate_chat_field(key, value)
+    console.print(f"Patching [cyan]{LLAMA_MODEL_CONFIGMAP}[/cyan]: {key}={value}")
+    _llama_patch_model_config(control, {key: value})
+    _restart_deployment(control, LLAMA_NS, "llama-chat")
+    console.print("[green]Done.[/green] llama-chat restarting.")
+
+
+@llama_app.command("set-ctx")
+def llama_set_ctx(
+    tokens: int = typer.Argument(..., help="Context size in tokens (e.g. 32768)."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_CTX_SIZE without touching the model or other knobs."""
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_CTX_SIZE", str(tokens))
+
+
+@llama_app.command("set-ngl")
+def llama_set_ngl(
+    layers: int = typer.Argument(..., help="GPU layer offload count (999 = all)."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_GPU_LAYERS — the main knob for fitting a bigger model
+    in less VRAM by offloading N layers to CPU.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_GPU_LAYERS", str(layers))
+
+
+@llama_app.command("set-parallel")
+def llama_set_parallel(
+    slots: int = typer.Argument(..., help="Concurrent request slots."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_PARALLEL_SLOTS — how many requests can decode at once.
+    Each slot gets a share of the KV cache, so higher = smaller effective
+    per-request context.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_PARALLEL_SLOTS", str(slots))
+
+
+@llama_app.command("set-kv-type")
+def llama_set_kv_type(
+    kv_type: str = typer.Argument(..., help=f"One of {list(_VALID_KV_TYPES)}."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_KV_TYPE — KV cache dtype. Smaller types buy context
+    size at a small quality cost. q8_0 is the standard-issue pick.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_KV_TYPE", kv_type)
+
+
+@llama_app.command("set-flash-attn")
+def llama_set_flash_attn(
+    mode: str = typer.Argument(..., help=f"One of {list(_VALID_FLASH_ATTN)}."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_FLASH_ATTN — usually 'on' on Blackwell/Ada,
+    'off' or 'auto' on older cards with partial FA support.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_FLASH_ATTN", mode)
+
+
+@llama_app.command("set-flags")
+def llama_set_flags(
+    flags: str = typer.Argument(..., help="Full replacement for CHAT_EXTRA_FLAGS."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Replace CHAT_EXTRA_FLAGS — the escape hatch for any llama-server
+    flag not yet promoted to a named field (--rope-*, --override-tensor,
+    sampling defaults, etc.).
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_EXTRA_FLAGS", flags)
 
 
 @llama_app.command("set-embed")

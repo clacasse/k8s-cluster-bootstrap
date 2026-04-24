@@ -66,6 +66,9 @@ spec:
                 --host 0.0.0.0 \
                 --port 8080 \
                 --ctx-size "${EMBED_CTX_SIZE}" \
+                --parallel "${EMBED_PARALLEL_SLOTS}" \
+                --pooling "${EMBED_POOLING}" \
+                --embeddings --metrics \
                 ${EMBED_EXTRA_FLAGS}
           envFrom:
             # Embed server only needs defaults — no per-deployment model

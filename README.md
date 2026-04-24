@@ -209,18 +209,31 @@ Change it immediately after first login.
 ### Manage models
 
 ```bash
-# Show the active chat + embed models and files on the PVCs
+# Show the active chat + embed models, all tunable knobs, and what's
+# cached on the PVCs. Keys marked `set` are in the imperative
+# ConfigMap; `default` = falling through to llama-cpp-defaults.
 ./scripts/cluster_manager.py llama list
 
-# First-time setup OR full reconfigure (prompts for repo, file, alias,
-# ctx size, flags; skips prompts for keys already set unless --force).
+# First-time setup OR full reconfigure — prompts for repo, file, alias,
+# ctx size, GPU layer offload, parallel slots, KV cache type, flash
+# attention, and extra flags. Skips prompts for keys already set
+# unless --force.
 ./scripts/cluster_manager.py llama setup
 
-# Quick swap to a different chat model, keeping ctx + flags as-is.
-# Init container pulls the GGUF from HuggingFace on first use; cached
-# to PVC for fast swaps back.
+# Swap the chat model and optionally retune knobs in one shot.
+# Required positional args: <hf-repo> <gguf-filename>. Every tunable
+# option is optional; unspecified = keeps current value.
 ./scripts/cluster_manager.py llama set-chat \
-    bartowski/Qwen_Qwen3-14B-GGUF Qwen_Qwen3-14B-Q5_K_M.gguf
+    bartowski/Qwen_Qwen3-14B-GGUF Qwen_Qwen3-14B-Q5_K_M.gguf \
+    --ctx 32768 --ngl 999 --kv-type q8_0
+
+# Targeted single-knob tweaks (each restarts llama-chat once).
+./scripts/cluster_manager.py llama set-ctx 65536
+./scripts/cluster_manager.py llama set-ngl 52
+./scripts/cluster_manager.py llama set-parallel 2
+./scripts/cluster_manager.py llama set-kv-type q4_0
+./scripts/cluster_manager.py llama set-flash-attn on
+./scripts/cluster_manager.py llama set-flags "--rope-scaling yarn --rope-freq-scale 2.0"
 
 # Swap the embed model (rare — changing dimensions means re-indexing
 # the vault; see --wipe-rag in `restart`).
