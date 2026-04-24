@@ -926,12 +926,14 @@ def _llama_patch_config(control: str, updates: dict[str, str]) -> None:
     quick experiments, commit to git when you pick a winner.
     """
     patch = {"data": updates}
-    subprocess.run(
-        [
-            "ssh", control, "sudo", "k3s", "kubectl",
-            "-n", LLAMA_NS, "patch", "configmap", LLAMA_CONFIGMAP,
-            "--type", "merge", "-p", json.dumps(patch),
-        ],
+    # Go through _kubectl so the JSON payload gets shlex.quote'd — ssh
+    # joins argv with spaces for the remote shell, and without quoting
+    # the braces/quotes in the JSON get re-tokenized and kubectl sees
+    # `data:` as a separate resource arg ("no need to specify a resource
+    # type…" error).
+    _kubectl(
+        control, "-n", LLAMA_NS, "patch", "configmap", LLAMA_CONFIGMAP,
+        "--type", "merge", "-p", json.dumps(patch),
         check=True,
     )
 
