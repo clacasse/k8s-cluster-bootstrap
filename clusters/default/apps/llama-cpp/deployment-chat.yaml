@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-chat
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama-chat
+  template:
+    metadata:
+      labels:
+        app: llama-chat
+    spec:
+      nodeSelector:
+        nvidia.com/gpu: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # Terminate cleanly on rollout. llama-server handles SIGTERM but the
+      # pipeline flush can take a beat if a request is in-flight.
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # Pull the GGUF to the PVC if it isn't already there. HF serves
+        # public models without auth; we just curl through the redirect.
+        # Skipping the download when the file exists keeps rollouts fast
+        # and tolerates offline reboots.
+        - name: pull-model
+          image: curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /models
+              dest="/models/${CHAT_MODEL_FILE}"
+              if [ -s "$dest" ]; then
+                echo "[pull-model] ${CHAT_MODEL_FILE} already present ($(stat -c%s "$dest") bytes), skipping"
+                exit 0
+              fi
+              url="https://huggingface.co/${CHAT_MODEL_REPO}/resolve/main/${CHAT_MODEL_FILE}"
+              echo "[pull-model] downloading ${url} -> ${dest}"
+              tmp="${dest}.partial"
+              # -f fails on HTTP errors, -L follows HF's 302 to the CDN,
+              # -C - resumes if we were interrupted mid-download.
+              curl -fL -C - -o "$tmp" "$url"
+              mv "$tmp" "$dest"
+              echo "[pull-model] done ($(stat -c%s "$dest") bytes)"
+          envFrom:
+            - configMapRef:
+                name: llama-cpp-config
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda-b8895
+          ports:
+            - name: http
+              containerPort: 8080
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              exec /app/llama-server \
+                --model "/models/${CHAT_MODEL_FILE}" \
+                --alias "${CHAT_SERVED_MODEL}" \
+                --host 0.0.0.0 \
+                --port 8080 \
+                --ctx-size "${CHAT_CTX_SIZE}" \
+                ${CHAT_EXTRA_FLAGS}
+          envFrom:
+            - configMapRef:
+                name: llama-cpp-config
+          # The server boots by memory-mapping the GGUF, warming the KV
+          # cache, and compiling CUDA kernels. On first cold start with a
+          # 10 GB model this takes 30-60s; subsequent restarts with a
+          # warm page cache are faster. Readiness probe generous enough
+          # to cover the slow case.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # Don't kill the pod for "slow" — only for truly wedged. The
+            # model-swap path can make /health take a while.
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 6Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 10Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: llama-chat-models

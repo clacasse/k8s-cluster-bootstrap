@@ -1,0 +1,33 @@
+# llama.cpp server ships Prometheus metrics at /metrics on the same port
+# as the API. Two ServiceMonitors (one per service) so Prometheus scrapes
+# chat and embed independently; that makes tokens/sec panels split cleanly
+# by `app` label in the dashboard.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llama-chat
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: llama-chat
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llama-embed
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: llama-embed
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics

@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-embed
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama-embed
+  template:
+    metadata:
+      labels:
+        app: llama-embed
+    spec:
+      # CPU-only. nomic-embed-text-v1.5 is a 137M-param model; CPU
+      # inference via llama.cpp is plenty fast for vault indexing
+      # (hundreds of embeddings/sec) and keeps the whole GPU free for
+      # the chat model. Running the embed server on the same GPU would
+      # require nvidia-device-plugin time-slicing — not worth the
+      # configuration cost here.
+      terminationGracePeriodSeconds: 15
+      initContainers:
+        - name: pull-model
+          image: curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /models
+              dest="/models/${EMBED_MODEL_FILE}"
+              if [ -s "$dest" ]; then
+                echo "[pull-model] ${EMBED_MODEL_FILE} already present ($(stat -c%s "$dest") bytes), skipping"
+                exit 0
+              fi
+              url="https://huggingface.co/${EMBED_MODEL_REPO}/resolve/main/${EMBED_MODEL_FILE}"
+              echo "[pull-model] downloading ${url} -> ${dest}"
+              tmp="${dest}.partial"
+              curl -fL -C - -o "$tmp" "$url"
+              mv "$tmp" "$dest"
+              echo "[pull-model] done ($(stat -c%s "$dest") bytes)"
+          envFrom:
+            - configMapRef:
+                name: llama-cpp-config
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: llama-server
+          # Plain CPU image. Smaller than server-cuda and doesn't need
+          # the nvidia runtime, so it's happy on any node.
+          image: ghcr.io/ggml-org/llama.cpp:server-b8895
+          ports:
+            - name: http
+              containerPort: 8080
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              exec /app/llama-server \
+                --model "/models/${EMBED_MODEL_FILE}" \
+                --alias "${EMBED_SERVED_MODEL}" \
+                --host 0.0.0.0 \
+                --port 8080 \
+                --ctx-size "${EMBED_CTX_SIZE}" \
+                ${EMBED_EXTRA_FLAGS}
+          envFrom:
+            - configMapRef:
+                name: llama-cpp-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: llama-embed-models

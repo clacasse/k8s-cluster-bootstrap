@@ -1,0 +1,39 @@
+# Model + server configuration for the llama.cpp stack.
+#
+# Swap the chat or embed model by editing CHAT_MODEL_* / EMBED_MODEL_* here
+# and letting Argo reconcile — the init container pulls the GGUF to the PVC
+# if it isn't there yet, and llama-server reloads on pod restart.
+#
+# Keep the *_CHAT_SERVED_MODEL and *_EMBED_SERVED_MODEL values pointed at
+# the same logical name the OpenAI-compatible clients (OpenClaw, rag-*)
+# expect — llama.cpp uses `--alias` to control the `model` field in
+# /v1/models responses.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-cpp-config
+data:
+  # --- Chat model ---
+  # Qwen3-14B-Instruct at Q5_K_M: ~10.5 GB weights, plus ~3 GB KV cache for
+  # 32k ctx at q8_0 = ~13.5 GB on-device. Fits an RTX 5080 (16 GB) with
+  # ~2 GB headroom for activations/CUDA workspace.
+  CHAT_MODEL_REPO: "bartowski/Qwen_Qwen3-14B-GGUF"
+  CHAT_MODEL_FILE: "Qwen_Qwen3-14B-Q5_K_M.gguf"
+  # Name reported via /v1/models — OpenClaw picks an entry by id, so keep
+  # this matched with the model id in openclaw.json.
+  CHAT_SERVED_MODEL: "qwen3-14b"
+  CHAT_CTX_SIZE: "32768"
+  # Flash-attention + quantized KV cache halves memory used by long contexts
+  # and doesn't measurably hurt quality on Qwen3 at Q5.
+  CHAT_EXTRA_FLAGS: "-ngl 999 -fa -ctk q8_0 -ctv q8_0 --metrics --jinja"
+
+  # --- Embedding model ---
+  # nomic-embed-text-v1.5 is 768-dim, same as the old Ollama pull. The
+  # existing Chroma collection's vectors are therefore compatible; we do
+  # NOT need to reindex the vault.
+  EMBED_MODEL_REPO: "nomic-ai/nomic-embed-text-v1.5-GGUF"
+  EMBED_MODEL_FILE: "nomic-embed-text-v1.5.Q8_0.gguf"
+  EMBED_SERVED_MODEL: "nomic-embed-text"
+  # The nomic model trains at 2048; longer ctx is wasted and slows batching.
+  EMBED_CTX_SIZE: "2048"
+  EMBED_EXTRA_FLAGS: "--embeddings --metrics --pooling mean"

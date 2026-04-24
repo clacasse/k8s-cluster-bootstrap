@@ -1,4 +1,5 @@
-"""RAG indexer: watches a vault directory, chunks files, embeds via Ollama, stores in ChromaDB."""
+"""RAG indexer: watches a vault directory, chunks files, embeds via the
+OpenAI-compatible llama.cpp server, stores in ChromaDB."""
 
 import hashlib
 import logging
@@ -17,7 +18,9 @@ log = logging.getLogger("rag-indexer")
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/vault"))
 CHROMADB_URL = os.environ.get("CHROMADB_URL", "http://chromadb:8000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ollama.svc.cluster.local:11434")
+# llama.cpp serves the OpenAI-compatible API under /v1. LLAMA_URL is the
+# base server address (no trailing /v1); we append /v1/embeddings below.
+LLAMA_URL = os.environ.get("LLAMA_URL", "http://llama-embed.llama-cpp.svc.cluster.local:8080")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "vault")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
@@ -98,12 +101,17 @@ def chunk_text(text: str, file_path: str) -> list[dict]:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    resp = requests.post(f"{OLLAMA_URL}/api/embed", json={
+    # OpenAI-style payload: {model, input: [str, ...]}. llama.cpp returns
+    # {data: [{index, embedding: [float, ...]}, ...], model, usage, object}.
+    # Preserve input order by sorting on `index`; llama-server has returned
+    # them in order in practice, but the spec doesn't guarantee it.
+    resp = requests.post(f"{LLAMA_URL}/v1/embeddings", json={
         "model": EMBED_MODEL,
         "input": texts,
     }, timeout=120)
     resp.raise_for_status()
-    return resp.json()["embeddings"]
+    rows = sorted(resp.json()["data"], key=lambda r: r["index"])
+    return [row["embedding"] for row in rows]
 
 
 def file_hash(path: Path) -> str:
@@ -165,12 +173,14 @@ def remove_file(collection, rel_path: str):
 def run():
     log.info(f"Vault: {VAULT_PATH}")
     log.info(f"ChromaDB: {CHROMADB_URL}")
-    log.info(f"Ollama: {OLLAMA_URL}")
+    log.info(f"llama.cpp: {LLAMA_URL}")
     log.info(f"Embed model: {EMBED_MODEL}")
     log.info(f"Poll interval: {POLL_INTERVAL}s")
 
-    # Wait for dependencies
-    for name, url, path in [("ChromaDB", CHROMADB_URL, "/api/v2/heartbeat"), ("Ollama", OLLAMA_URL, "/api/tags")]:
+    # Wait for dependencies. llama.cpp's server exposes a /health endpoint
+    # that returns 200 once the model is loaded — that's stricter than
+    # /v1/models (which can 200 while weights are still memory-mapping).
+    for name, url, path in [("ChromaDB", CHROMADB_URL, "/api/v2/heartbeat"), ("llama.cpp", LLAMA_URL, "/health")]:
         for attempt in range(60):
             try:
                 resp = requests.get(f"{url}{path}", timeout=5)

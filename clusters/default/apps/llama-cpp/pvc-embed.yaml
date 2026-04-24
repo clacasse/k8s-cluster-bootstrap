@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llama-embed-models
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # Embedding models are tiny (nomic v1.5 at Q8_0 is ~140 MB); 5 Gi is
+      # plenty for a couple of variants side by side.
+      storage: 5Gi

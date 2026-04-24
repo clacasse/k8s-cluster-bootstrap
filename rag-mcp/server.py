@@ -21,7 +21,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("rag-mcp")
 
 CHROMADB_URL = os.environ.get("CHROMADB_URL", "http://chromadb:8000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ollama.svc.cluster.local:11434")
+# llama.cpp serves the OpenAI-compatible API under /v1. LLAMA_URL is the
+# base server address (no trailing /v1); /v1/embeddings is appended below.
+LLAMA_URL = os.environ.get("LLAMA_URL", "http://llama-embed.llama-cpp.svc.cluster.local:8080")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "vault")
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/vault")).resolve()
@@ -54,12 +56,13 @@ def get_collection():
 
 
 def embed_query(text: str) -> list[float]:
-    resp = requests.post(f"{OLLAMA_URL}/api/embed", json={
+    # OpenAI-style response: {data: [{index, embedding}, ...]}.
+    resp = requests.post(f"{LLAMA_URL}/v1/embeddings", json={
         "model": EMBED_MODEL,
         "input": [text],
     }, timeout=60)
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
+    return resp.json()["data"][0]["embedding"]
 
 
 @mcp.tool()
@@ -176,7 +179,7 @@ def read_note(path: str) -> str:
 
 if __name__ == "__main__":
     log.info(f"ChromaDB: {CHROMADB_URL}")
-    log.info(f"Ollama: {OLLAMA_URL}")
+    log.info(f"llama.cpp: {LLAMA_URL}")
     log.info(f"Embed model: {EMBED_MODEL}")
     log.info(f"Vault: {VAULT_PATH}")
 

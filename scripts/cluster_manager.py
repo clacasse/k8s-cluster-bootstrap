@@ -6,7 +6,7 @@ Single CLI wrapping the full lifecycle:
   prep-node       per-node: add to inventory, apt upgrade, hostname, NVIDIA if GPU
   bootstrap       whole-cluster: k3s + Argo CD
   setup-secrets   one-time: create TLS cert, OpenClaw token, initial model
-  models          runtime: list, pull, set, remove Ollama models
+  llama           runtime: list / set chat + embed models on llama.cpp
   status          runtime: cluster/node/pod summary
   sync-upstream   pull upstream changes into your instance repo
 
@@ -664,7 +664,11 @@ def setup_secrets(
     if _kubectl_exists(control, "openclaw", "configmap", "openclaw-model"):
         console.print("[dim]openclaw-model ConfigMap already exists, skipping.[/dim]")
     else:
-        model = typer.prompt("Default model for OpenClaw (e.g. gemma4:26b)")
+        # Default should match the llama.cpp chat server's --alias
+        # (see CHAT_SERVED_MODEL in clusters/default/apps/llama-cpp/configmap.yaml).
+        # OpenClaw resolves "openai/<id>" against the provider's /v1/models,
+        # so if this name doesn't match the alias, tool calls 404.
+        model = typer.prompt("Default model for OpenClaw", default="qwen3-14b")
         _kubectl(control, "-n", "openclaw", "create", "configmap", "openclaw-model",
                  f"--from-literal=active-model={model}")
         console.print(f"[green]Active model set to {model}.[/green]")
@@ -876,6 +880,195 @@ def approve_pairing(
     _ssh(control,
         f"sudo k3s kubectl -n openclaw exec deploy/openclaw --"
         f" openclaw pairing approve {_q(channel)} {_q(code)}"
+    )
+
+
+LLAMA_NS = "llama-cpp"
+LLAMA_CONFIGMAP = "llama-cpp-config"
+
+# Keys in the llama-cpp-config ConfigMap that `llama set-chat` /
+# `llama set-embed` mutate. Keep in sync with
+# clusters/default/apps/llama-cpp/configmap.yaml — if that file renames
+# a key, the CLI will quietly fail to find it on read, so the reads
+# double-check presence and bail loudly instead.
+_LLAMA_CHAT_KEYS = ("CHAT_MODEL_REPO", "CHAT_MODEL_FILE", "CHAT_SERVED_MODEL")
+_LLAMA_EMBED_KEYS = ("EMBED_MODEL_REPO", "EMBED_MODEL_FILE", "EMBED_SERVED_MODEL")
+
+
+llama_app = typer.Typer(
+    name="llama",
+    help="Manage llama.cpp chat + embed model selection.",
+    no_args_is_help=True,
+)
+app.add_typer(llama_app)
+
+
+def _llama_read_config(control: str) -> dict[str, str]:
+    """Read llama-cpp-config data as a plain dict. Empty dict if missing."""
+    result = _kubectl(
+        control, "-n", LLAMA_NS, "get", "configmap", LLAMA_CONFIGMAP,
+        "--ignore-not-found", "-o", "json",
+        capture=True, check=False,
+    )
+    if not (result.stdout or "").strip():
+        return {}
+    return json.loads(result.stdout).get("data", {}) or {}
+
+
+def _llama_patch_config(control: str, updates: dict[str, str]) -> None:
+    """Strategic-merge patch the llama-cpp-config ConfigMap `data` field.
+
+    We patch rather than rewrite so unrelated keys (the other role's
+    model, server flags) stay untouched. Argo's selfHeal will reconcile
+    the ConfigMap back to git on the next sync, so these edits are
+    effectively temporary — for permanent changes, edit the repo file
+    and let Argo apply it. That's intentional: use `llama set-*` for
+    quick experiments, commit to git when you pick a winner.
+    """
+    patch = {"data": updates}
+    subprocess.run(
+        [
+            "ssh", control, "sudo", "k3s", "kubectl",
+            "-n", LLAMA_NS, "patch", "configmap", LLAMA_CONFIGMAP,
+            "--type", "merge", "-p", json.dumps(patch),
+        ],
+        check=True,
+    )
+
+
+def _llama_pvc_for(role: str) -> str:
+    return "llama-chat-models" if role == "chat" else "llama-embed-models"
+
+
+def _llama_deployment_for(role: str) -> str:
+    return "llama-chat" if role == "chat" else "llama-embed"
+
+
+@llama_app.command("list")
+def llama_list(
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Show the active chat + embed models and files on the PVCs."""
+    if control is None:
+        control = _get_control_host()
+
+    data = _llama_read_config(control)
+    if not data:
+        console.print(f"[red]ConfigMap {LLAMA_CONFIGMAP} not found in {LLAMA_NS}[/red]")
+        raise typer.Exit(1)
+
+    def _line(role: str, keys: tuple[str, ...]) -> str:
+        repo = data.get(keys[0], "?")
+        fname = data.get(keys[1], "?")
+        served = data.get(keys[2], "?")
+        return f"  [bold]{role}[/bold]  [cyan]{repo}/{fname}[/cyan]  served as [green]{served}[/green]"
+
+    console.print("[bold]Active models:[/bold]")
+    console.print(_line("chat ", _LLAMA_CHAT_KEYS))
+    console.print(_line("embed", _LLAMA_EMBED_KEYS))
+
+    for role in ("chat", "embed"):
+        deploy = _llama_deployment_for(role)
+        console.print(f"\n[bold]{deploy} PVC contents:[/bold]")
+        # List /models inside a running pod; if the deployment is down
+        # (e.g. mid-rollout), we skip and say so — that's more useful
+        # than a kubectl error.
+        result = _kubectl(
+            control, "-n", LLAMA_NS, "exec", f"deploy/{deploy}", "--",
+            "sh", "-c", "ls -lh /models 2>/dev/null | tail -n +2",
+            capture=True, check=False,
+        )
+        out = (result.stdout or "").strip()
+        console.print(out if out else "  [dim](deployment not running — skipping disk list)[/dim]")
+
+
+def _llama_set(control: str, role: str, repo: str, filename: str, served_as: str | None) -> None:
+    keys = _LLAMA_CHAT_KEYS if role == "chat" else _LLAMA_EMBED_KEYS
+    updates = {
+        keys[0]: repo,
+        keys[1]: filename,
+    }
+    if served_as:
+        updates[keys[2]] = served_as
+    console.print(f"Patching [cyan]{LLAMA_CONFIGMAP}[/cyan]: {updates}")
+    _llama_patch_config(control, updates)
+
+    # Bouncing the deployment triggers the init container, which curls
+    # the GGUF from HF to the PVC if absent (first-use for new model) or
+    # reuses the cached file (subsequent switches). First pull of a ~10 GB
+    # chat model takes minutes over a home connection — tail `kubectl
+    # logs -f deploy/llama-chat -c pull-model` to watch progress.
+    deploy = _llama_deployment_for(role)
+    console.print(f"Restarting [cyan]{deploy}[/cyan]")
+    _restart_deployment(control, LLAMA_NS, deploy)
+    console.print(
+        f"[green]Done.[/green] Pod will download the GGUF (if not cached) and reload."
+    )
+
+
+@llama_app.command("set-chat")
+def llama_set_chat(
+    repo: str = typer.Argument(..., help="HuggingFace repo, e.g. bartowski/Qwen_Qwen3-14B-GGUF"),
+    filename: str = typer.Argument(..., help="GGUF filename inside the repo, e.g. Qwen_Qwen3-14B-Q5_K_M.gguf"),
+    served_as: str = typer.Option(
+        None, "--served-as",
+        help="Name to expose via /v1/models (OpenClaw picks models by this id). "
+             "Defaults to keeping the current value.",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Switch the llama-chat model. Restarts llama-chat deployment."""
+    if control is None:
+        control = _get_control_host()
+    _llama_set(control, "chat", repo, filename, served_as)
+
+
+@llama_app.command("set-embed")
+def llama_set_embed(
+    repo: str = typer.Argument(..., help="HuggingFace repo, e.g. nomic-ai/nomic-embed-text-v1.5-GGUF"),
+    filename: str = typer.Argument(..., help="GGUF filename, e.g. nomic-embed-text-v1.5.Q8_0.gguf"),
+    served_as: str = typer.Option(
+        None, "--served-as",
+        help="Name to expose via /v1/models. Must match EMBED_MODEL env in "
+             "the rag-indexer/rag-mcp deployments, or embeddings calls 404.",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Switch the llama-embed model. Restarts llama-embed deployment.
+
+    Changing embed models means the vector space changes — existing
+    Chroma vectors become meaningless. If you're swapping to a model
+    with a different output dimension (e.g. 768 → 1024), also re-index
+    the vault: `cluster-manager restart --wipe-rag`.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set(control, "embed", repo, filename, served_as)
+
+
+@llama_app.command("logs")
+def llama_logs(
+    role: str = typer.Argument(..., help="chat or embed"),
+    container: str = typer.Option(
+        "llama-server", "--container",
+        help="'llama-server' (default) or 'pull-model' for the init container.",
+    ),
+    follow: bool = typer.Option(False, "-f", "--follow"),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Tail logs of the llama-chat or llama-embed pod."""
+    if role not in ("chat", "embed"):
+        console.print("[red]role must be 'chat' or 'embed'[/red]")
+        raise typer.Exit(2)
+    if control is None:
+        control = _get_control_host()
+    deploy = _llama_deployment_for(role)
+    args = ["-n", LLAMA_NS, "logs", f"deploy/{deploy}", "-c", container]
+    if follow:
+        args.append("-f")
+    subprocess.run(
+        ["ssh", control, "sudo", "k3s", "kubectl"] + args,
+        check=False,
     )
 
 

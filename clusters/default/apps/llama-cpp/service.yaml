@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-chat
+  labels:
+    app: llama-chat
+spec:
+  type: ClusterIP
+  selector:
+    app: llama-chat
+  ports:
+    # llama-server serves the OpenAI-compatible API and Prometheus /metrics
+    # on the same port. One named port is enough; the ServiceMonitor uses
+    # this service + the `metrics` label as its scrape target.
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-embed
+  labels:
+    app: llama-embed
+spec:
+  type: ClusterIP
+  selector:
+    app: llama-embed
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: 8080

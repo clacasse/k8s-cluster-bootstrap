@@ -22,8 +22,12 @@ spec:
               value: /vault
             - name: CHROMADB_URL
               value: http://chromadb.openclaw.svc.cluster.local:8000
-            - name: OLLAMA_URL
-              value: http://ollama-metrics.ollama.svc.cluster.local:11434
+            # llama-embed exposes OpenAI-compatible /v1/embeddings. The
+            # EMBED_MODEL name must match the --alias baked into the
+            # llama.cpp chat/embed ConfigMap (EMBED_SERVED_MODEL) — if they
+            # drift, the embeddings call returns "model not found".
+            - name: LLAMA_URL
+              value: http://llama-embed.llama-cpp.svc.cluster.local:8080
             - name: EMBED_MODEL
               value: nomic-embed-text
             - name: POLL_INTERVAL

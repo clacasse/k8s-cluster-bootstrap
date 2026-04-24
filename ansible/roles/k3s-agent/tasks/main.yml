@@ -11,7 +11,7 @@
   register: k3s_agent_binary
 
 # Node-role labels + taints so only workloads that opt in schedule on these nodes:
-#   - GPU: AI workloads (Ollama) tolerate nvidia.com/gpu=true
+#   - GPU: AI workloads (llama.cpp) tolerate nvidia.com/gpu=true
 #   - storage: stateful workloads (Garage, CNPG) tolerate role=storage
 # Keys avoid the kubernetes.io/ namespace: kubelet rejects self-registered labels
 # there with the error "unknown 'kubernetes.io' or 'k8s.io' labels specified with

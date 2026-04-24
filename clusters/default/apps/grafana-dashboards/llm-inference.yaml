@@ -1,0 +1,135 @@
+# llama.cpp dashboard — replaces the Ollama-specific one removed when we
+# migrated off Ollama. Panels use the `llamacpp:*` Prometheus metrics that
+# llama-server exposes on /metrics (see --metrics in the ConfigMap). The
+# `app` label distinguishes chat (qwen3) and embed (nomic) servers so the
+# same dashboard covers both.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-llm-inference
+  labels:
+    grafana_dashboard: "1"
+data:
+  llm-inference.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "graphTooltip": 1,
+      "title": "LLM Inference (llama.cpp)",
+      "panels": [
+        {
+          "title": "Tokens Per Second (generation)",
+          "description": "How fast each llama-server generates output tokens.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(llamacpp:tokens_predicted_total{app=~\"llama-chat|llama-embed\"}[5m])",
+              "legendFormat": "{{app}} gen tok/s"
+            }
+          ]
+        },
+        {
+          "title": "Tokens Per Second (prompt)",
+          "description": "Prompt-processing throughput — the ingest side.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(llamacpp:prompt_tokens_total{app=~\"llama-chat|llama-embed\"}[5m])",
+              "legendFormat": "{{app}} prompt tok/s"
+            }
+          ]
+        },
+        {
+          "title": "Requests In Flight",
+          "description": "Currently-processing + queued requests. Spikes here mean the server is the bottleneck.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "llamacpp:requests_processing{app=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{app}} processing"
+            },
+            {
+              "expr": "llamacpp:requests_deferred{app=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{app}} deferred"
+            }
+          ]
+        },
+        {
+          "title": "KV Cache Usage",
+          "description": "Fraction of the KV cache in use. Sustained >90% means the chat server is about to evict earlier turns.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "llamacpp:kv_cache_usage_ratio{app=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{app}}"
+            }
+          ]
+        },
+        {
+          "title": "Generation Time (avg)",
+          "description": "Average wall time spent in generation per request.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "s" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(llamacpp:tokens_predicted_seconds_total{app=~\"llama-chat|llama-embed\"}[5m]) / clamp_min(rate(llamacpp:n_decode_total{app=~\"llama-chat|llama-embed\"}[5m]), 1)",
+              "legendFormat": "{{app}} avg s/decode"
+            }
+          ]
+        },
+        {
+          "title": "GPU VRAM Utilization",
+          "description": "Whole-GPU memory usage from DCGM — useful cross-check that the chat model actually fits.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "bytes" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024",
+              "legendFormat": "VRAM used ({{Hostname}})"
+            },
+            {
+              "expr": "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 1024 * 1024",
+              "legendFormat": "VRAM total ({{Hostname}})"
+            }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "time": { "from": "now-1h", "to": "now" },
+      "timezone": "browser",
+      "refresh": "30s"
+    }

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llama-chat-models
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # Chat GGUF is ~10-20 GB depending on quant; leave room to swap models
+      # in and out without repaving the PVC (e.g. Q5_K_M + Q8_0 + one future
+      # experiment). local-path is backed by the node's NVMe.
+      storage: 60Gi

@@ -200,17 +200,22 @@ Change it immediately after first login.
 ### Manage models
 
 ```bash
-# See what's pulled and which is active
-./scripts/cluster_manager.py models list
+# Show the active chat + embed models and files on the PVCs
+./scripts/cluster_manager.py llama list
 
-# Pull a new model
-./scripts/cluster_manager.py models pull llama3.3:70b
+# Swap the chat model. Args are <hf-repo> <gguf-filename>; the init
+# container downloads from HuggingFace on first use and caches to PVC.
+./scripts/cluster_manager.py llama set-chat \
+    bartowski/Qwen_Qwen3-14B-GGUF Qwen_Qwen3-14B-Q5_K_M.gguf
 
-# Switch the active model (restarts OpenClaw)
-./scripts/cluster_manager.py models set llama3.3:70b
+# Swap the embed model (rare — changing dimensions means re-indexing
+# the vault; see --wipe-rag in `restart`).
+./scripts/cluster_manager.py llama set-embed \
+    nomic-ai/nomic-embed-text-v1.5-GGUF nomic-embed-text-v1.5.Q8_0.gguf
 
-# Remove a model you no longer need
-./scripts/cluster_manager.py models remove llama3.2:3b
+# Tail logs
+./scripts/cluster_manager.py llama logs chat -f
+./scripts/cluster_manager.py llama logs chat -c pull-model -f   # init-container
 ```
 
 ### Check cluster status
