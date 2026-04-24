@@ -1,8 +1,13 @@
 # llama.cpp dashboard — replaces the Ollama-specific one removed when we
 # migrated off Ollama. Panels use the `llamacpp:*` Prometheus metrics that
-# llama-server exposes on /metrics (see --metrics in the ConfigMap). The
-# `app` label distinguishes chat (qwen3) and embed (nomic) servers so the
-# same dashboard covers both.
+# llama-server exposes on /metrics (see --metrics in the ConfigMap).
+#
+# Label note: kube-prometheus-stack's default ServiceMonitor relabeling
+# does NOT forward arbitrary Kubernetes labels (like our app=llama-chat)
+# onto scraped samples. Metrics come out labeled with the canonical
+# Prometheus set — `job`, `service`, `pod`, `namespace`, `container`,
+# `endpoint`, `instance`. We filter on `job=~"llama-chat|llama-embed"`
+# (job name is auto-set from the ServiceMonitor resource name).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,7 +24,7 @@ data:
       "panels": [
         {
           "title": "Tokens Per Second (generation)",
-          "description": "How fast each llama-server generates output tokens.",
+          "description": "How fast each llama-server generates output tokens. Uses the built-in gauge which is smoothed server-side.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -29,14 +34,14 @@ data:
           },
           "targets": [
             {
-              "expr": "rate(llamacpp:tokens_predicted_total{app=~\"llama-chat|llama-embed\"}[5m])",
-              "legendFormat": "{{app}} gen tok/s"
+              "expr": "llamacpp:predicted_tokens_seconds{job=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{job}} gen tok/s"
             }
           ]
         },
         {
           "title": "Tokens Per Second (prompt)",
-          "description": "Prompt-processing throughput — the ingest side.",
+          "description": "Prompt-processing throughput — the ingest side. Much higher than generation because prompt tokens parallelize.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -46,14 +51,14 @@ data:
           },
           "targets": [
             {
-              "expr": "rate(llamacpp:prompt_tokens_total{app=~\"llama-chat|llama-embed\"}[5m])",
-              "legendFormat": "{{app}} prompt tok/s"
+              "expr": "llamacpp:prompt_tokens_seconds{job=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{job}} prompt tok/s"
             }
           ]
         },
         {
           "title": "Requests In Flight",
-          "description": "Currently-processing + queued requests. Spikes here mean the server is the bottleneck.",
+          "description": "Processing = slots actively decoding; Deferred = requests queued because all slots are busy. Sustained non-zero deferred means the server is saturated.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -63,52 +68,52 @@ data:
           },
           "targets": [
             {
-              "expr": "llamacpp:requests_processing{app=~\"llama-chat|llama-embed\"}",
-              "legendFormat": "{{app}} processing"
+              "expr": "llamacpp:requests_processing{job=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{job}} processing"
             },
             {
-              "expr": "llamacpp:requests_deferred{app=~\"llama-chat|llama-embed\"}",
-              "legendFormat": "{{app}} deferred"
+              "expr": "llamacpp:requests_deferred{job=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{job}} deferred"
             }
           ]
         },
         {
-          "title": "KV Cache Usage",
-          "description": "Fraction of the KV cache in use. Sustained >90% means the chat server is about to evict earlier turns.",
+          "title": "Largest Observed Prompt",
+          "description": "High-water mark of request size in tokens, across all slots. Approaching CHAT_CTX_SIZE (32768) means you're about to hit \"request exceeds context size\" rejections. llama.cpp doesn't expose live KV-cache usage as a metric, so this high-water is the best proxy for context pressure.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "fieldConfig": {
-            "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+            "defaults": { "unit": "short" },
             "overrides": []
           },
           "targets": [
             {
-              "expr": "llamacpp:kv_cache_usage_ratio{app=~\"llama-chat|llama-embed\"}",
-              "legendFormat": "{{app}}"
+              "expr": "llamacpp:n_tokens_max{job=~\"llama-chat|llama-embed\"}",
+              "legendFormat": "{{job}} max n_tokens"
             }
           ]
         },
         {
-          "title": "Generation Time (avg)",
-          "description": "Average wall time spent in generation per request.",
+          "title": "Decode Throughput (rate-based)",
+          "description": "Independent cross-check on the smoothed gen tok/s panel: computes generation rate from the raw counter over a 5-minute window. Diverging from the top-left panel means the server's smoothing is lagging recent activity.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "fieldConfig": {
-            "defaults": { "unit": "s" },
+            "defaults": { "unit": "short" },
             "overrides": []
           },
           "targets": [
             {
-              "expr": "rate(llamacpp:tokens_predicted_seconds_total{app=~\"llama-chat|llama-embed\"}[5m]) / clamp_min(rate(llamacpp:n_decode_total{app=~\"llama-chat|llama-embed\"}[5m]), 1)",
-              "legendFormat": "{{app}} avg s/decode"
+              "expr": "rate(llamacpp:tokens_predicted_total{job=~\"llama-chat|llama-embed\"}[5m])",
+              "legendFormat": "{{job}} tok/s (5m rate)"
             }
           ]
         },
         {
           "title": "GPU VRAM Utilization",
-          "description": "Whole-GPU memory usage from DCGM — useful cross-check that the chat model actually fits.",
+          "description": "Whole-GPU memory usage from DCGM — cross-checks that the chat model fits. Not joinable to llama-server instance labels, so it's one line per physical GPU.",
           "type": "timeseries",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
           "datasource": { "type": "prometheus", "uid": "prometheus" },
