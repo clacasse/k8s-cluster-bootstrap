@@ -1165,7 +1165,7 @@ _LLAMA_SETUP_DEFAULTS = {
     "CHAT_SERVED_MODEL":   "qwen3-14b",
     "CHAT_CTX_SIZE":       "32768",
     "CHAT_GPU_LAYERS":     "999",
-    "CHAT_PARALLEL_SLOTS": "4",
+    "CHAT_PARALLEL_SLOTS": "1",
     "CHAT_KV_TYPE":        "q8_0",
     "CHAT_FLASH_ATTN":     "on",
     "CHAT_EXTRA_FLAGS":    "",
@@ -1368,8 +1368,11 @@ def llama_set_parallel(
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
     """Change CHAT_PARALLEL_SLOTS — how many requests can decode at once.
-    Each slot gets a share of the KV cache, so higher = smaller effective
-    per-request context.
+    llama.cpp DIVIDES the total ctx across slots (per-request ctx =
+    CHAT_CTX_SIZE / CHAT_PARALLEL_SLOTS), so bumping this shrinks the
+    effective per-request context. Default is 1 (full ctx per request);
+    raise only if you need to serve concurrent clients AND your prompts
+    fit in the smaller per-slot window.
     """
     if control is None:
         control = _get_control_host()

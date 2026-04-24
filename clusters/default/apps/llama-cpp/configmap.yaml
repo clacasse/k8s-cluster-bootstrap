@@ -32,7 +32,14 @@ data:
   #   llama set-ctx N  /  llama set-ngl N  /  llama set-kv-type TYPE  /  etc.
   CHAT_CTX_SIZE: "32768"           # context window; safe inside 32k-native-trained models
   CHAT_GPU_LAYERS: "999"           # 999 = "all on GPU"; llama-server clamps to actual layer count
-  CHAT_PARALLEL_SLOTS: "4"         # concurrent request slots; spread KV cache across them
+  # --parallel DIVIDES the total context across slots (each slot gets
+  # ctx/parallel tokens). 1 = the full 32k is available per request,
+  # at the cost of not serving concurrent requests in parallel. This
+  # matches the agent workflow: OpenClaw issues sequential calls, each
+  # of which can legitimately use the full context for long compaction
+  # prompts. Bump this only if you have genuinely concurrent clients
+  # AND each request fits in the smaller per-slot ctx.
+  CHAT_PARALLEL_SLOTS: "1"
   CHAT_KV_TYPE: "q8_0"             # KV cache dtype; applied to both K and V
   CHAT_FLASH_ATTN: "on"            # Blackwell/Ada have it; Ampere partial
   CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
