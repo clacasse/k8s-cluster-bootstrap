@@ -152,19 +152,19 @@ After each node is prepped, its hostname is set and registered in router DNS —
 ./scripts/cluster_manager.py bootstrap
 ```
 
-### 6. Create secrets
+### 6. Create secrets + pick initial chat model
 
 Generates secrets and runtime config that aren't stored in git. Run once after bootstrap.
 
 ```bash
-./scripts/cluster_manager.py setup-secrets              # app-level
+./scripts/cluster_manager.py setup-secrets              # app-level secrets
 ./scripts/cluster_manager.py bootstrap-infra-secrets    # infrastructure-level
+./scripts/cluster_manager.py llama setup                # pick chat model
 ```
 
 `setup-secrets` creates:
 - Wildcard TLS certificate for `*.APPS_DOMAIN` (self-signed, 10-year)
 - OpenClaw gateway token (save it — needed for the web UI)
-- Initial model selection for OpenClaw (prompts you to choose)
 - Grafana admin password
 
 `bootstrap-infra-secrets` creates:
@@ -172,7 +172,16 @@ Generates secrets and runtime config that aren't stored in git. Run once after b
 - Applies the single-node Garage layout (idempotent: detects already-applied layout)
 - Prints the Garage admin token — save it if you want to use the admin API directly
 
-Both commands are safe to re-run.
+`llama setup` creates:
+- `llama-cpp/llama-cpp-model` ConfigMap (CHAT_MODEL_REPO/FILE/alias/ctx/flags)
+- `openclaw/openclaw-model` ConfigMap (active-model, kept in sync with the alias)
+
+Both ConfigMaps are **imperatively managed** — not reconciled from git — so
+edits via `llama setup` or `llama set-chat` persist without needing a commit.
+The upstream template deliberately ships NO opinion about which chat model
+your deployment should run.
+
+All three commands are safe to re-run.
 
 ### 7. Verify
 
@@ -203,8 +212,13 @@ Change it immediately after first login.
 # Show the active chat + embed models and files on the PVCs
 ./scripts/cluster_manager.py llama list
 
-# Swap the chat model. Args are <hf-repo> <gguf-filename>; the init
-# container downloads from HuggingFace on first use and caches to PVC.
+# First-time setup OR full reconfigure (prompts for repo, file, alias,
+# ctx size, flags; skips prompts for keys already set unless --force).
+./scripts/cluster_manager.py llama setup
+
+# Quick swap to a different chat model, keeping ctx + flags as-is.
+# Init container pulls the GGUF from HuggingFace on first use; cached
+# to PVC for fast swaps back.
 ./scripts/cluster_manager.py llama set-chat \
     bartowski/Qwen_Qwen3-14B-GGUF Qwen_Qwen3-14B-Q5_K_M.gguf
 
@@ -334,7 +348,8 @@ Pure git workflow — no Ansible, no DNS:
 | `init-fork [URL] [--apps-domain D]` | Rewrite `REPO_URL` + `APPS_DOMAIN` placeholders in cluster manifests. |
 | `prep-node <ip> [--hostname H] [--role R]` | Add node to inventory, authorize SSH key, run prep playbook (apt upgrade, hostname, NVIDIA). |
 | `bootstrap` | Run `ansible/cluster.yml` against the whole inventory (k3s + Argo CD). |
-| `setup-secrets` | Generate TLS cert, OpenClaw token, Grafana password, and initial model selection. |
+| `setup-secrets` | Generate TLS cert, OpenClaw gateway token, Grafana password. |
+| `llama setup` | Pick chat model for this deployment (writes imperative ConfigMaps). |
 | `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
 | `setup-telegram` | Configure Telegram bot token for OpenClaw. |
 | `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |

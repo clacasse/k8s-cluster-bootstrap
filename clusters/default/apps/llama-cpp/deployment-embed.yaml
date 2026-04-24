@@ -43,7 +43,7 @@ spec:
               echo "[pull-model] done ($(stat -c%s "$dest") bytes)"
           envFrom:
             - configMapRef:
-                name: llama-cpp-config
+                name: llama-cpp-defaults
           volumeMounts:
             - name: models
               mountPath: /models
@@ -68,8 +68,11 @@ spec:
                 --ctx-size "${EMBED_CTX_SIZE}" \
                 ${EMBED_EXTRA_FLAGS}
           envFrom:
+            # Embed server only needs defaults — no per-deployment model
+            # ConfigMap. (Changing embed model = vault re-index, always
+            # deliberate and committed to git.)
             - configMapRef:
-                name: llama-cpp-config
+                name: llama-cpp-defaults
           readinessProbe:
             httpGet:
               path: /health

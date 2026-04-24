@@ -1,59 +1,34 @@
-# Model + server configuration for the llama.cpp stack.
+# Template-level, Argo-managed llama.cpp defaults.
 #
-# Swap the chat or embed model by editing CHAT_MODEL_* / EMBED_MODEL_* here
-# and letting Argo reconcile — the init container pulls the GGUF to the PVC
-# if it isn't there yet, and llama-server reloads on pod restart.
+# This ConfigMap holds only the keys that do NOT vary per deployment:
+# the embedding model + its server flags. Changing the embedding model
+# invalidates the existing Chroma collection (different vector space)
+# so it's treated as a deliberate infrastructure change, not a runtime
+# knob — it lives here in git where a change requires a commit.
 #
-# Keep the *_CHAT_SERVED_MODEL and *_EMBED_SERVED_MODEL values pointed at
-# the same logical name the OpenAI-compatible clients (OpenClaw, rag-*)
-# expect — llama.cpp uses `--alias` to control the `model` field in
-# /v1/models responses.
+# The *chat* model is intentionally NOT here. Chat model choice is a
+# per-deployment operator decision — pinning a specific model in the
+# upstream template would force every fork to inherit one person's
+# taste and VRAM budget. Instead, chat config lives in a separate
+# ConfigMap `llama-cpp-model` that is created imperatively by
+# `cluster_manager.py llama setup`, and updated by `llama set-chat`.
+# That one is not reconciled by Argo, so runtime edits persist.
+#
+# The llama-chat deployment envFroms BOTH ConfigMaps, with
+# `llama-cpp-model` marked optional so a fresh cluster can boot the
+# llama-cpp Argo app before the operator has run `llama setup` —
+# the pod will then crashloop on missing CHAT_MODEL_FILE, which is
+# the intended signal that setup is required.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: llama-cpp-config
+  name: llama-cpp-defaults
 data:
-  # --- Chat model ---
-  # Qwen3-14B-Instruct at Q5_K_M: ~9.5 GB of weights, fits fully on the
-  # RTX 5080 (16 GB). Architecture: 41 transformer layers, hidden=5120,
-  # 40 attn heads / 8 KV heads (GQA 5:1). No CPU offload needed.
-  #
-  # VRAM budget at 32k ctx, all layers on GPU (measured from startup log):
-  #   Model weights (Q5_K_M)      ≈  9.5 GB
-  #   CUDA0 KV cache (32k, q8_0)  ≈  2.7 GB
-  #   Compute buffer + frag       ≈  0.8 GB
-  #   ─────────────────────────   ─ ~13.0 GB (leaves ~3.3 GB headroom)
-  #
-  # Why 32k not 64k:
-  # - Qwen3-14B was trained at 32k native context (n_ctx_train=32768).
-  #   Going past that uses RoPE scaling and can measurably degrade
-  #   long-context quality — not worth it.
-  # - Qwen3-14B has 8 KV heads (vs qwen3.6-27B's 4), so its KV cache
-  #   grows twice as fast per ctx-token. 64k was viable on the 27B but
-  #   pinned the 14B to ~15.6 GB used with only 224 MB free.
-  # - OpenClaw's long-session compaction prompts top out around 25-27k
-  #   tokens, which fits cleanly in 32k with 5-7k of headroom for the
-  #   summary response.
-  #
-  # Speed: expect ~80 tok/s generation, ~500-1000 tok/s prompt
-  # processing on the 5080 at Q5_K_M all-GPU. Dramatic improvement over
-  # the previous 27B partial-offload setup (~12 tok/s gen) which paid
-  # the CPU-layers-via-DDR5 tax on every token.
-  CHAT_MODEL_REPO: "bartowski/Qwen_Qwen3-14B-GGUF"
-  CHAT_MODEL_FILE: "Qwen_Qwen3-14B-Q5_K_M.gguf"
-  # Name reported via /v1/models — OpenClaw picks an entry by id, so keep
-  # this matched with the model id in openclaw.json + the openclaw-model
-  # ConfigMap's active-model key (imperatively managed, not in git).
-  CHAT_SERVED_MODEL: "qwen3-14b"
-  CHAT_CTX_SIZE: "32768"
-  # -ngl 999 = "all layers on GPU" (llama-server clamps to actual layer
-  # count). No -t flag needed since CPU isn't in the inference path.
-  CHAT_EXTRA_FLAGS: "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja"
-
   # --- Embedding model ---
   # nomic-embed-text-v1.5 is 768-dim, same as the old Ollama pull. The
   # existing Chroma collection's vectors are therefore compatible; we do
-  # NOT need to reindex the vault.
+  # NOT need to reindex the vault. Changing this value requires
+  # re-indexing — see `cluster_manager.py restart --wipe-rag`.
   EMBED_MODEL_REPO: "nomic-ai/nomic-embed-text-v1.5-GGUF"
   EMBED_MODEL_FILE: "nomic-embed-text-v1.5.Q8_0.gguf"
   EMBED_SERVED_MODEL: "nomic-embed-text"

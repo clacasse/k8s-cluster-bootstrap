@@ -52,7 +52,10 @@ spec:
               echo "[pull-model] done ($(stat -c%s "$dest") bytes)"
           envFrom:
             - configMapRef:
-                name: llama-cpp-config
+                name: llama-cpp-defaults
+            - configMapRef:
+                name: llama-cpp-model
+                optional: true
           volumeMounts:
             - name: models
               mountPath: /models
@@ -75,8 +78,18 @@ spec:
                 --ctx-size "${CHAT_CTX_SIZE}" \
                 ${CHAT_EXTRA_FLAGS}
           envFrom:
+            # Template-level defaults (embed model + common flags).
             - configMapRef:
-                name: llama-cpp-config
+                name: llama-cpp-defaults
+            # Per-deployment operator config — chat model repo/file/alias/
+            # ctx/flags. Created + updated by `cluster_manager.py llama
+            # setup` and `llama set-chat`. Marked optional so a fresh
+            # cluster boots the Argo app cleanly before first setup; the
+            # pod will crashloop on missing CHAT_MODEL_FILE, which is the
+            # intended signal that setup is required.
+            - configMapRef:
+                name: llama-cpp-model
+                optional: true
           # The server boots by memory-mapping the GGUF, warming the KV
           # cache, and compiling CUDA kernels. On first cold start with a
           # 10 GB model this takes 30-60s; subsequent restarts with a

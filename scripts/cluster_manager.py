@@ -5,8 +5,8 @@ Single CLI wrapping the full lifecycle:
   init-fork       one-time: rewrite REPO_URL + APPS_DOMAIN placeholders
   prep-node       per-node: add to inventory, apt upgrade, hostname, NVIDIA if GPU
   bootstrap       whole-cluster: k3s + Argo CD
-  setup-secrets   one-time: create TLS cert, OpenClaw token, initial model
-  llama           runtime: list / set chat + embed models on llama.cpp
+  setup-secrets   one-time: create TLS cert, OpenClaw token, Grafana creds
+  llama           model management: setup / list / set-chat / set-embed
   status          runtime: cluster/node/pod summary
   sync-upstream   pull upstream changes into your instance repo
 
@@ -660,18 +660,12 @@ def setup_secrets(
         console.print(f"[bold]Save this token — you'll need it to log into the OpenClaw web UI:[/bold]")
         console.print(f"\n  [cyan]{token}[/cyan]\n")
 
-    # --- OpenClaw active model ConfigMap ---
-    if _kubectl_exists(control, "openclaw", "configmap", "openclaw-model"):
-        console.print("[dim]openclaw-model ConfigMap already exists, skipping.[/dim]")
-    else:
-        # Default should match the llama.cpp chat server's --alias
-        # (see CHAT_SERVED_MODEL in clusters/default/apps/llama-cpp/configmap.yaml).
-        # OpenClaw resolves "openai/<id>" against the provider's /v1/models,
-        # so if this name doesn't match the alias, tool calls 404.
-        model = typer.prompt("Default model for OpenClaw", default="qwen3-14b")
-        _kubectl(control, "-n", "openclaw", "create", "configmap", "openclaw-model",
-                 f"--from-literal=active-model={model}")
-        console.print(f"[green]Active model set to {model}.[/green]")
+    # Note: the OpenClaw active-model ConfigMap used to be created here.
+    # It's been moved to `cluster_manager.py llama setup` — that command
+    # now writes both the llama-cpp-model ConfigMap (chat server's
+    # env) AND openclaw-model (OpenClaw's reference to it), atomically,
+    # which is cleaner than having two commands write to the same place.
+    # `setup-secrets` is secrets-only now.
 
     # --- OpenClaw config ConfigMap ---
     if _kubectl_exists(control, "openclaw", "configmap", "openclaw-config"):
@@ -884,14 +878,24 @@ def approve_pairing(
 
 
 LLAMA_NS = "llama-cpp"
-LLAMA_CONFIGMAP = "llama-cpp-config"
+# Two ConfigMaps back the llama.cpp stack, split by management lifecycle:
+#   llama-cpp-defaults — Argo-managed, in git. Holds embedding model
+#     config + any other keys that shouldn't vary per deployment.
+#   llama-cpp-model    — imperatively managed by `llama setup` /
+#     `llama set-chat`. Holds the chat model the operator picked for
+#     THIS deployment. Not in git; not reconciled by Argo; edits stick.
+# The llama-chat pod's `envFrom` points at BOTH (model as optional, so
+# the pod boots on a fresh cluster and crashloops on missing
+# CHAT_MODEL_FILE — the intended signal that `llama setup` is needed).
+LLAMA_DEFAULTS_CONFIGMAP = "llama-cpp-defaults"
+LLAMA_MODEL_CONFIGMAP = "llama-cpp-model"
 
-# Keys in the llama-cpp-config ConfigMap that `llama set-chat` /
-# `llama set-embed` mutate. Keep in sync with
-# clusters/default/apps/llama-cpp/configmap.yaml — if that file renames
-# a key, the CLI will quietly fail to find it on read, so the reads
-# double-check presence and bail loudly instead.
+# Keys in llama-cpp-model that `llama setup` / `llama set-chat` mutate.
+# Source-of-truth for the chat model the deployment is serving.
 _LLAMA_CHAT_KEYS = ("CHAT_MODEL_REPO", "CHAT_MODEL_FILE", "CHAT_SERVED_MODEL")
+# Keys in llama-cpp-defaults for the embed model. `llama set-embed`
+# edits llama-cpp-defaults in the live cluster — Argo will revert that
+# on the next sync, so for a durable change, edit the git file too.
 _LLAMA_EMBED_KEYS = ("EMBED_MODEL_REPO", "EMBED_MODEL_FILE", "EMBED_SERVED_MODEL")
 
 
@@ -904,27 +908,36 @@ app.add_typer(llama_app)
 
 
 def _llama_read_config(control: str) -> dict[str, str]:
-    """Read llama-cpp-config data as a plain dict. Empty dict if missing."""
-    result = _kubectl(
-        control, "-n", LLAMA_NS, "get", "configmap", LLAMA_CONFIGMAP,
-        "--ignore-not-found", "-o", "json",
-        capture=True, check=False,
-    )
-    if not (result.stdout or "").strip():
-        return {}
-    return json.loads(result.stdout).get("data", {}) or {}
-
-
-def _llama_patch_config(control: str, updates: dict[str, str]) -> None:
-    """Strategic-merge patch the llama-cpp-config ConfigMap `data` field.
-
-    We patch rather than rewrite so unrelated keys (the other role's
-    model, server flags) stay untouched. Argo's selfHeal will reconcile
-    the ConfigMap back to git on the next sync, so these edits are
-    effectively temporary — for permanent changes, edit the repo file
-    and let Argo apply it. That's intentional: use `llama set-*` for
-    quick experiments, commit to git when you pick a winner.
+    """Read both ConfigMaps, merged. Values in llama-cpp-model win over
+    llama-cpp-defaults on key collision, same as the pod's envFrom order.
     """
+    out: dict[str, str] = {}
+    for cm in (LLAMA_DEFAULTS_CONFIGMAP, LLAMA_MODEL_CONFIGMAP):
+        result = _kubectl(
+            control, "-n", LLAMA_NS, "get", "configmap", cm,
+            "--ignore-not-found", "-o", "json",
+            capture=True, check=False,
+        )
+        if (result.stdout or "").strip():
+            out.update(json.loads(result.stdout).get("data", {}) or {})
+    return out
+
+
+def _llama_patch_model_config(control: str, updates: dict[str, str]) -> None:
+    """Apply a ConfigMap merge patch to llama-cpp-model, creating the
+    ConfigMap if it doesn't exist yet.
+
+    llama-cpp-model is imperative: NOT in git, NOT Argo-managed. Edits
+    here persist across reconciles.
+    """
+    # Ensure the ConfigMap exists (empty-body create is fine if it doesn't).
+    if not _kubectl_exists(control, LLAMA_NS, "configmap", LLAMA_MODEL_CONFIGMAP):
+        _ssh(control,
+            f"sudo k3s kubectl -n {LLAMA_NS} create configmap"
+            f" {LLAMA_MODEL_CONFIGMAP} --dry-run=client -o yaml"
+            f" | sudo k3s kubectl apply -f -",
+            capture=True,
+        )
     patch = {"data": updates}
     # Go through _kubectl so the JSON payload gets shlex.quote'd — ssh
     # joins argv with spaces for the remote shell, and without quoting
@@ -932,7 +945,7 @@ def _llama_patch_config(control: str, updates: dict[str, str]) -> None:
     # `data:` as a separate resource arg ("no need to specify a resource
     # type…" error).
     _kubectl(
-        control, "-n", LLAMA_NS, "patch", "configmap", LLAMA_CONFIGMAP,
+        control, "-n", LLAMA_NS, "patch", "configmap", LLAMA_MODEL_CONFIGMAP,
         "--type", "merge", "-p", json.dumps(patch),
         check=True,
     )
@@ -956,8 +969,18 @@ def llama_list(
 
     data = _llama_read_config(control)
     if not data:
-        console.print(f"[red]ConfigMap {LLAMA_CONFIGMAP} not found in {LLAMA_NS}[/red]")
+        console.print(
+            f"[red]No llama.cpp ConfigMaps found in {LLAMA_NS}.[/red]\n"
+            f"Expected {LLAMA_DEFAULTS_CONFIGMAP} (from Argo) + "
+            f"{LLAMA_MODEL_CONFIGMAP} (from `llama setup`)."
+        )
         raise typer.Exit(1)
+    if not any(data.get(k) for k in _LLAMA_CHAT_KEYS):
+        console.print(
+            "[yellow]No chat model configured yet.[/yellow] "
+            f"Run [cyan]cluster_manager.py llama setup[/cyan] to populate "
+            f"{LLAMA_MODEL_CONFIGMAP}."
+        )
 
     def _line(role: str, keys: tuple[str, ...]) -> str:
         repo = data.get(keys[0], "?")
@@ -992,8 +1015,34 @@ def _llama_set(control: str, role: str, repo: str, filename: str, served_as: str
     }
     if served_as:
         updates[keys[2]] = served_as
-    console.print(f"Patching [cyan]{LLAMA_CONFIGMAP}[/cyan]: {updates}")
-    _llama_patch_config(control, updates)
+
+    if role == "chat":
+        # Chat config lives in llama-cpp-model (imperative). Edits persist.
+        # Also keep OpenClaw's active-model ConfigMap in lockstep with the
+        # served-as alias — openclaw.json interpolates ${ACTIVE_MODEL}
+        # from it, and a mismatch 404s every inference call.
+        console.print(f"Patching [cyan]{LLAMA_MODEL_CONFIGMAP}[/cyan]: {updates}")
+        _llama_patch_model_config(control, updates)
+        if served_as:
+            _apply_openclaw_active_model(control, served_as)
+    else:
+        # Embed config lives in llama-cpp-defaults (Argo-managed). Live
+        # patch works for a quick experiment but Argo will revert it on
+        # the next sync — warn so the operator knows to also edit git
+        # for a durable change. Embed swaps also invalidate the Chroma
+        # collection (different vector space) so this is rare anyway.
+        console.print(
+            f"[yellow]Note:[/yellow] patching [cyan]{LLAMA_DEFAULTS_CONFIGMAP}[/cyan]: {updates}\n"
+            f"  Argo will revert this on next sync — for a durable change, "
+            f"also edit clusters/default/apps/llama-cpp/configmap.yaml in git.\n"
+            f"  Embed dimension change? Remember to `restart --wipe-rag` "
+            f"to reindex the vault."
+        )
+        _kubectl(
+            control, "-n", LLAMA_NS, "patch", "configmap", LLAMA_DEFAULTS_CONFIGMAP,
+            "--type", "merge", "-p", json.dumps({"data": updates}),
+            check=True,
+        )
 
     # Bouncing the deployment triggers the init container, which curls
     # the GGUF from HF to the PVC if absent (first-use for new model) or
@@ -1003,9 +1052,122 @@ def _llama_set(control: str, role: str, repo: str, filename: str, served_as: str
     deploy = _llama_deployment_for(role)
     console.print(f"Restarting [cyan]{deploy}[/cyan]")
     _restart_deployment(control, LLAMA_NS, deploy)
+    if role == "chat":
+        # OpenClaw reads active-model at init-container time; restart to
+        # pick up a name change on its side too.
+        _restart_deployment(control, "openclaw", "openclaw")
     console.print(
         f"[green]Done.[/green] Pod will download the GGUF (if not cached) and reload."
     )
+
+
+def _apply_openclaw_active_model(control: str, served_as: str) -> None:
+    """Write the openclaw-model ConfigMap so openclaw.json's
+    ${ACTIVE_MODEL} interpolation matches the chat server's --alias.
+    """
+    _ssh(control,
+        f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
+        f" --from-literal=active-model={_q(served_as)}"
+        f" --dry-run=client -o yaml"
+        f" | sudo k3s kubectl apply -f -",
+        capture=True,
+    )
+
+
+# Defaults offered by `llama setup` on a fresh deployment. Sensible
+# for a 16 GB-class consumer GPU (5080, 4080, 3080/3090) running a 14B
+# chat model all on the card. Users with different hardware will be
+# prompted to override.
+_LLAMA_SETUP_DEFAULTS = {
+    "CHAT_MODEL_REPO":   "bartowski/Qwen_Qwen3-14B-GGUF",
+    "CHAT_MODEL_FILE":   "Qwen_Qwen3-14B-Q5_K_M.gguf",
+    "CHAT_SERVED_MODEL": "qwen3-14b",
+    "CHAT_CTX_SIZE":     "32768",
+    "CHAT_EXTRA_FLAGS":  "-ngl 999 --flash-attn on -ctk q8_0 -ctv q8_0 --metrics --jinja",
+}
+
+
+@llama_app.command("setup")
+def llama_setup(
+    repo: str = typer.Option(None, "--repo", help="HuggingFace repo for the chat GGUF."),
+    filename: str = typer.Option(None, "--file", help="GGUF filename inside the repo."),
+    served_as: str = typer.Option(None, "--served-as", help="Model id reported via /v1/models."),
+    ctx_size: str = typer.Option(None, "--ctx", help="Context size in tokens."),
+    extra_flags: str = typer.Option(None, "--flags", help="Extra llama-server flags."),
+    restart: bool = typer.Option(True, "--restart/--no-restart", help="Bounce llama-chat + openclaw pods after the write."),
+    force: bool = typer.Option(False, "--force", help="Re-prompt even for keys that are already set."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """First-time + reconfigure of the llama-chat model.
+
+    Writes TWO ConfigMaps, both imperatively managed (not in git, not
+    reconciled by Argo):
+      - llama-cpp/llama-cpp-model: CHAT_* env keys the llama-chat pod
+        reads via envFrom. What file to serve, ctx size, flags, alias.
+      - openclaw/openclaw-model: active-model key interpolated into
+        openclaw.json so OpenClaw picks the same model-id the chat
+        server advertises under /v1/models.
+
+    Re-run any time you want to change the chat model. For a quick
+    one-arg swap between already-configured models, `llama set-chat`
+    is faster; `llama setup` is for the full reconfigure flow.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    existing = _llama_read_config(control)
+    existing_active = _kubectl(
+        control, "-n", "openclaw", "get", "configmap", "openclaw-model",
+        "--ignore-not-found", "-o", "jsonpath={.data.active-model}",
+        capture=True, check=False,
+    ).stdout.strip()
+
+    cli_overrides = {
+        "CHAT_MODEL_REPO": repo,
+        "CHAT_MODEL_FILE": filename,
+        "CHAT_SERVED_MODEL": served_as,
+        "CHAT_CTX_SIZE": ctx_size,
+        "CHAT_EXTRA_FLAGS": extra_flags,
+    }
+
+    def _resolve(key: str, label: str) -> str:
+        if cli_overrides[key]:
+            return cli_overrides[key]
+        current = existing.get(key)
+        # If the key is already set AND we're not in --force, skip the
+        # prompt and keep what's there. This makes re-runs with a single
+        # CLI override fast (only re-prompt for what's missing).
+        if current and not force:
+            return current
+        default = current or _LLAMA_SETUP_DEFAULTS[key]
+        return typer.prompt(label, default=default)
+
+    values = {
+        "CHAT_MODEL_REPO":   _resolve("CHAT_MODEL_REPO",   "Chat model HuggingFace repo"),
+        "CHAT_MODEL_FILE":   _resolve("CHAT_MODEL_FILE",   "Chat GGUF filename"),
+        "CHAT_SERVED_MODEL": _resolve("CHAT_SERVED_MODEL", "Served-as model id (advertised via /v1/models)"),
+        "CHAT_CTX_SIZE":     _resolve("CHAT_CTX_SIZE",     "Context size (tokens)"),
+        "CHAT_EXTRA_FLAGS":  _resolve("CHAT_EXTRA_FLAGS",  "llama-server extra flags"),
+    }
+
+    console.print(f"\nWriting [cyan]{LLAMA_NS}/{LLAMA_MODEL_CONFIGMAP}[/cyan]:")
+    for k, v in values.items():
+        console.print(f"  {k}={v}")
+    _llama_patch_model_config(control, values)
+
+    if existing_active != values["CHAT_SERVED_MODEL"]:
+        console.print(
+            f"Writing [cyan]openclaw/openclaw-model[/cyan]: "
+            f"active-model={values['CHAT_SERVED_MODEL']}"
+        )
+        _apply_openclaw_active_model(control, values["CHAT_SERVED_MODEL"])
+
+    if restart:
+        console.print("Restarting [cyan]llama-chat[/cyan] and [cyan]openclaw[/cyan]")
+        _restart_deployment(control, LLAMA_NS, "llama-chat")
+        _restart_deployment(control, "openclaw", "openclaw")
+
+    console.print("[green]Done.[/green]")
 
 
 @llama_app.command("set-chat")
@@ -1019,7 +1181,12 @@ def llama_set_chat(
     ),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
-    """Switch the llama-chat model. Restarts llama-chat deployment."""
+    """Quick swap: just the repo + filename (+ optional alias).
+
+    For the full reconfigure flow (ctx size, server flags) use
+    `llama setup` instead — this command only touches the model
+    repo/file/alias and keeps everything else at current values.
+    """
     if control is None:
         control = _get_control_host()
     _llama_set(control, "chat", repo, filename, served_as)
