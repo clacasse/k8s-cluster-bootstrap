@@ -102,19 +102,15 @@ spec:
             failureThreshold: 6
           resources:
             requests:
-              # With partial CPU offload (qwen3.6-27b at -ngl 52/64) the CPU
-              # layers run matmul every token — give this pod a real CPU
-              # share, not just schedule-time request sizing.
-              cpu: "2"
-              # 14 GiB limit covers: the ~3 GB of CPU-resident quantized
-              # weights + mmap page cache for the ~17 GB GGUF + llama-server
-              # runtime. Bump if you switch to a less-offloaded split or a
-              # bigger model; trim back if you return to an all-GPU config.
-              memory: 8Gi
+              # All-GPU inference — CPU just serves the HTTP layer + mmap
+              # overhead for the GGUF page cache. Request sizing is back
+              # to the pre-CPU-offload shape.
+              cpu: "1"
+              memory: 6Gi
               nvidia.com/gpu: "1"
             limits:
-              cpu: "8"
-              memory: 14Gi
+              cpu: "4"
+              memory: 10Gi
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: models
