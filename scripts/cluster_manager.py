@@ -1264,6 +1264,38 @@ def llama_setup(
     console.print("[green]Done.[/green]")
 
 
+def _suggest_served_as(filename: str) -> str:
+    """Best-effort derive a served-as model id from a GGUF filename.
+
+    Strips the GGUF extension, a leading "Org_" packaging prefix, and
+    any trailing quant suffix (-Q5_K_M, -IQ4_XS, .Q8_0, etc.). Lowercases.
+    Returns '' if nothing usable remains.
+
+    Examples:
+      Qwen3.6-27B-IQ4_XS.gguf            -> qwen3.6-27b
+      Qwen_Qwen3-14B-Q5_K_M.gguf         -> qwen3-14b
+      DeepSeek-R1-Distill-Qwen-14B-Q5_K_M.gguf -> deepseek-r1-distill-qwen-14b
+    """
+    name = filename.rsplit("/", 1)[-1]
+    if name.endswith(".gguf"):
+        name = name[:-5]
+    # Strip "Org_" repackaging prefix (e.g., "Qwen_Qwen3-14B" -> "Qwen3-14B").
+    # Only if the prefix is a single capitalized word — avoids stripping
+    # legit hyphenated family names.
+    if "_" in name:
+        first, rest = name.split("_", 1)
+        if first.isalpha() and first[0].isupper() and rest[:1].isalpha():
+            name = rest
+    # Drop trailing quant suffix (matches both -Q4_K_M and .Q8_0 etc.).
+    name = re.sub(
+        r"[-\._](IQ|Q)\d[_.]?[A-Z0-9_]*$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    return name.lower()
+
+
 @llama_app.command("set-chat")
 def llama_set_chat(
     repo: str = typer.Argument(..., help="HuggingFace repo, e.g. bartowski/Qwen_Qwen3-14B-GGUF"),
@@ -1271,7 +1303,7 @@ def llama_set_chat(
     served_as: str = typer.Option(
         None, "--served-as",
         help="Id exposed via /v1/models (OpenClaw picks models by this id). "
-             "Keeps current value if omitted.",
+             "If omitted AND the model is changing, you'll be prompted.",
     ),
     ctx: str = typer.Option(None, "--ctx", help="Context size in tokens."),
     ngl: str = typer.Option(None, "--ngl", help="GPU layer offload count (999 = all)."),
@@ -1279,6 +1311,14 @@ def llama_set_chat(
     kv_type: str = typer.Option(None, "--kv-type", help=f"One of {list(_VALID_KV_TYPES)}."),
     flash_attn: str = typer.Option(None, "--flash-attn", help=f"One of {list(_VALID_FLASH_ATTN)}."),
     flags: str = typer.Option(None, "--flags", help="Replace CHAT_EXTRA_FLAGS (escape hatch)."),
+    keep_alias: bool = typer.Option(
+        False, "--keep-alias",
+        help="Explicitly keep the current --served-as alias across a model "
+             "change. Suppresses the served-as mismatch prompt. Use when "
+             "you're swapping variants within a family (e.g. bartowski's "
+             "Q5 -> unsloth's Q5 of the same base model) and want to keep "
+             "the existing alias for API-client stability.",
+    ),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
     """Swap chat model and optionally tune knobs in one shot.
@@ -1287,9 +1327,15 @@ def llama_set_chat(
     switch. Every `--<knob>` option is optional; anything omitted keeps
     the current ConfigMap value. One write, one restart.
 
+    If you change the model but don't pass --served-as, you'll get a
+    warning + prompt to update the alias — OpenClaw otherwise keeps
+    reporting the old model id even though the weights have changed.
+    Pass --keep-alias to suppress that prompt for intentional
+    within-family variant swaps.
+
     Examples:
-      # Pure model swap (uses current ctx/ngl/etc.)
-      llama set-chat unsloth/Qwen3-30B-A3B-GGUF Qwen3-30B-A3B-Q4_K_M.gguf
+      # Pure model swap + alias update (prompted)
+      llama set-chat bartowski/Qwen3.6-27B-GGUF Qwen3.6-27B-IQ4_XS.gguf
 
       # Swap and retune for partial offload at longer context
       llama set-chat <repo> <file> --ctx 16384 --ngl 52 --kv-type q4_0
@@ -1312,6 +1358,30 @@ def llama_set_chat(
         if val is not None:
             _validate_chat_field(key, val)
             updates[key] = val
+
+    # Model changed + alias not explicitly updated = likely mistake.
+    # OpenClaw keeps reporting the old id under /v1/models, and chat
+    # requests silently route to the new weights — functional but
+    # misleading. Warn + prompt for an updated alias.
+    if served_as is None and not keep_alias:
+        existing = _llama_read_config(control)
+        current_repo = existing.get("CHAT_MODEL_REPO", "")
+        current_file = existing.get("CHAT_MODEL_FILE", "")
+        current_served = existing.get("CHAT_SERVED_MODEL", "")
+        if (repo != current_repo or filename != current_file) and current_served:
+            suggestion = _suggest_served_as(filename) or current_served
+            console.print(
+                f"[yellow]⚠ Model is changing but --served-as was not set.[/yellow]\n"
+                f"  Current alias: [cyan]{current_served}[/cyan]\n"
+                f"  New model:     [cyan]{filename}[/cyan]\n"
+                f"  Without an alias update, OpenClaw + /v1/models will keep "
+                f"reporting [cyan]{current_served}[/cyan] even though the "
+                f"weights have switched."
+            )
+            if typer.confirm("Update alias?", default=True):
+                new_served = typer.prompt("New served-as", default=suggestion)
+                _validate_chat_field("CHAT_SERVED_MODEL", new_served)
+                updates["CHAT_SERVED_MODEL"] = new_served
 
     console.print(f"Patching [cyan]{LLAMA_MODEL_CONFIGMAP}[/cyan]:")
     for k, v in updates.items():
