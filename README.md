@@ -1,20 +1,30 @@
 # k8s Cluster Bootstrap
 
-Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run two commands: you end up with a k3s cluster managed by Argo CD, ready to host an LLM inference server on the GPU node.
+Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run a handful of commands: you end up with a k3s cluster managed by Argo CD, a full local LLM stack (llama.cpp chat + embed servers, OpenClaw agent, RAG pipeline, ChromaDB), and infra (CloudNativePG, Garage S3, Prometheus + Grafana) pre-wired and reachable on your LAN.
 
 > **LAN-only by design.** In-cluster services (LLM inference, Ingress endpoints) don't carry their own authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
 
 ## What you get
 
+**Cluster + GitOps**
 - **k3s** cluster: 1 server + N agents (no HA). Node roles: `control`, `worker`, `gpu`, `storage`.
 - **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `https://argocd.apps`
-- **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases are installed by default
-- **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps create their own buckets and access keys
-- **Node Feature Discovery (NFD)** auto-labels nodes with hardware info (PCI devices, CPU features)
-- **NVIDIA device plugin** installed via Helm so pods can request `nvidia.com/gpu: 1`
-- **Prometheus + Grafana** for hardware monitoring (CPU, memory, temperature, GPU) — at `https://grafana.apps`
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
-- A single Python CLI (`cluster_manager.py`) that drives the whole lifecycle — including registering a **private apps repo** that Argo watches alongside this one
+
+**Local LLM stack** (all runs on your hardware, no API calls out)
+- **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot.
+- **OpenClaw** agent at `https://openclaw.apps` with built-in MCP support, Slack + Telegram channels, Obsidian-vault workspace
+- **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes
+- All model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template has no opinion)
+
+**Infrastructure**
+- **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases installed by default
+- **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps provision their own buckets via `provision-s3-app`
+- **Prometheus + Grafana** at `https://grafana.apps` with node + GPU + LLM-inference dashboards out of the box
+- **DCGM exporter** for NVIDIA GPU metrics; **NFD** auto-labels nodes with hardware info; **NVIDIA device plugin** so pods can request `nvidia.com/gpu: 1`
+
+**Tooling**
+- A single Python CLI (`cluster_manager.py`) that drives the whole lifecycle — bootstrap, secrets, model setup, app provisioning, plus registering one or more **private apps repos** that Argo watches alongside this one for the workloads you don't want in the public template
 
 ## How the two repos work
 
@@ -53,13 +63,15 @@ To pull upstream improvements into your instance later:
                                     LAN (router DNS)
 
                    *.apps  →  control node IP  (wildcard A record)
-                   AI workloads (LLM inference) → GPU node
-                   Workspace synced via Obsidian Sync
+                   GPU-pinned: llama-chat, dcgm-exporter, nfd-worker
+                   Storage-pinned: garage, CNPG cluster PVCs
+                   Everything else (control plane + light pods): control
 ```
 
 - **One server, no HA.** If it dies, rebuild from git.
-- **GPU node is tainted** so random workloads don't steal its resources.
-- **Minimum useful cluster** is 1 control + 1 GPU; scale agents as you like.
+- **GPU node is tainted** with `nvidia.com/gpu=true:NoSchedule` so random workloads don't steal its resources. Only pods that explicitly tolerate the taint and pin to it (the chat LLM, GPU monitoring) land there.
+- **Storage node is tainted** with `role=storage:NoSchedule` for the same reason — Garage and any DB volume PVCs pin there.
+- **Minimum useful cluster** is 1 control + 1 GPU; the storage node is optional (its pods fall back to the control node when absent). Scale workers however you like.
 
 ## Requirements
 
@@ -204,6 +216,55 @@ ssh k3s-control sudo k3s kubectl -n argocd get secret argocd-initial-admin-secre
 
 Change it immediately after first login.
 
+## Local LLM stack architecture
+
+Two `llama-server` pods backing the agent + RAG pipeline:
+
+```
+namespace: llama-cpp
+┌────────────────────────────────┐    ┌────────────────────────────────┐
+│  llama-chat  (GPU pod)         │    │  llama-embed  (CPU pod)        │
+│  pinned to nvidia.com/gpu node │    │  ~140 MB nomic-embed-text      │
+│  serves chat completions       │    │  serves /v1/embeddings         │
+│  /v1/chat/completions, /v1/... │    │  /v1/embeddings, /metrics      │
+└──────────────┬─────────────────┘    └──────────────┬─────────────────┘
+               │                                     │
+               │  OpenAI-compatible HTTP             │
+               │                                     │
+       ┌───────┴───────┐                     ┌───────┴────────┐
+       │   OpenClaw    │                     │  rag-indexer   │
+       │  (openclaw)   │  ◄──MCP /sse──┐     │ + rag-mcp      │
+       └───────────────┘               │     │  (openclaw ns) │
+                                       └─────┤                │
+                                             └────────────────┘
+```
+
+### Two ConfigMaps for chat-model config
+
+The chat server reads its env from two ConfigMaps merged in order:
+
+| ConfigMap | Lives in | Lifecycle | Contains |
+|---|---|---|---|
+| `llama-cpp-defaults` | git (`apps/llama-cpp/configmap.yaml`) | Argo-managed | Embed model + sensible defaults for every chat knob (ctx 32768, ngl 999, parallel 1, kv q8_0, flash-attn on) |
+| `llama-cpp-model` | imperatively created by `llama setup` | NOT in git, NOT reconciled | Per-deployment chat: `CHAT_MODEL_REPO`, `CHAT_MODEL_FILE`, `CHAT_SERVED_MODEL`, plus any tunables you've overridden |
+
+The pod's `envFrom` lists both with `llama-cpp-model` second, so anything set there wins. This is what lets the upstream template carry NO opinion about which chat model your fork runs while still booting cleanly out of the box (you'll see a clear "run llama setup" crashloop on a fresh cluster).
+
+`llama setup` writes both `llama-cpp-model` and `openclaw-model` (the alias OpenClaw advertises) atomically — they stay consistent. Subsequent quick swaps go through `llama set-chat`, targeted tweaks through `llama set-ctx` / `set-ngl` / etc. All of these survive Argo syncs because they touch the imperative ConfigMap, not the git-managed one.
+
+### Tunable knobs
+
+Every per-deployment knob is a first-class field with validation, exposed via dedicated CLI verbs:
+
+| Field | CLI flag | Default | What it does |
+|---|---|---|---|
+| `CHAT_CTX_SIZE` | `--ctx N` / `set-ctx N` | 32768 | Context window in tokens |
+| `CHAT_GPU_LAYERS` | `--ngl N` / `set-ngl N` | 999 (all) | Layers on GPU; lower = partial CPU offload |
+| `CHAT_PARALLEL_SLOTS` | `--parallel N` / `set-parallel N` | 1 | Concurrent request slots; raising shrinks per-request ctx |
+| `CHAT_KV_TYPE` | `--kv-type T` / `set-kv-type T` | q8_0 | KV cache dtype: `q8_0`, `q4_0`, `q5_0`, `f16` |
+| `CHAT_FLASH_ATTN` | `--flash-attn V` / `set-flash-attn V` | on | `on`, `off`, `auto` |
+| `CHAT_EXTRA_FLAGS` | `--flags STR` / `set-flags "<str>"` | "" | Escape hatch: `--rope-scaling`, `--override-tensor`, sampling defaults, etc. |
+
 ## Day-to-day operations
 
 ### Manage models
@@ -307,10 +368,17 @@ Setup refuses if a project with the same derived (or explicit) name already poin
 
 ```bash
 ./scripts/cluster_manager.py setup-slack
-| `setup-telegram` | Configure Telegram bot token for OpenClaw. |
 ```
 
-Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens.
+Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens; `remove-slack` to delete.
+
+### Connect Telegram (optional)
+
+```bash
+./scripts/cluster_manager.py setup-telegram
+```
+
+Prompts for your bot token from BotFather. Stores it, restarts OpenClaw. `remove-telegram` to delete.
 
 ### Set up Obsidian Sync workspace (optional)
 
@@ -354,32 +422,69 @@ Pure git workflow — no Ansible, no DNS:
 
 ## The CLI
 
-`scripts/cluster_manager.py` is the single entrypoint:
+`scripts/cluster_manager.py` is the single entrypoint. Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options on any command.
+
+### Bootstrap + nodes
 
 | Command | Purpose |
 |---|---|
-| `init-fork [URL] [--apps-domain D]` | Rewrite `REPO_URL` + `APPS_DOMAIN` placeholders in cluster manifests. |
+| `init-fork [URL] [--apps-domain D]` | One-time: rewrite `REPO_URL` + `APPS_DOMAIN` placeholders in cluster manifests. |
 | `prep-node <ip> [--hostname H] [--role R]` | Add node to inventory, authorize SSH key, run prep playbook (apt upgrade, hostname, NVIDIA). |
-| `bootstrap` | Run `ansible/cluster.yml` against the whole inventory (k3s + Argo CD). |
-| `setup-secrets` | Generate TLS cert, OpenClaw gateway token, Grafana password. |
-| `llama setup` | Pick chat model for this deployment (writes imperative ConfigMaps). |
-| `setup-slack` | Configure Slack bot + app tokens for OpenClaw. |
-| `setup-telegram` | Configure Telegram bot token for OpenClaw. |
+| `bootstrap [-- <ansible-args>]` | Install/upgrade k3s on every node + Argo CD on control. Idempotent and version-aware (re-runs the installer when `k3s_version` in `group_vars/all.yml` differs from what's on the node). |
+| `remove-node <hostname>` | Cordon, drain, uninstall k3s, and remove from inventory. |
+| `sync-upstream [--remote R] [--branch B]` | Pull upstream changes into your instance repo and re-apply `init-fork` placeholders. |
+
+### Secrets + per-deployment config
+
+| Command | Purpose |
+|---|---|
+| `setup-secrets` | Generate wildcard TLS cert, OpenClaw gateway token, Grafana admin password. Idempotent. |
+| `bootstrap-infra-secrets` | Generate Garage's auth tokens, create the `garage-auth` Secret, apply the single-node Garage layout. |
+| `llama setup` | Interactive prompt for chat-model repo / file / alias / context size / GPU layers / parallel slots / KV cache type / flash-attn / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `openclaw/openclaw-model` in sync. |
+
+### Day-to-day
+
+| Command | Purpose |
+|---|---|
+| `status` | `kubectl get nodes,pods -A` via SSH to the control node. |
+| `restart [--wipe-rag]` | Restart the full app stack in the right order. `--wipe-rag` deletes ChromaDB data and re-indexes. |
+| `llama list` | Show active chat + embed models, every tunable knob (with `set` vs `default` markers), and what's cached on the PVCs. |
+| `llama set-chat <repo> <file> [--ctx N --ngl N --kv-type T --parallel N --flash-attn V --served-as NAME --flags STR]` | Swap chat model and optionally retune knobs in one shot. Warns + prompts when the model changes without `--served-as` (use `--keep-alias` to suppress). |
+| `llama set-ctx N` / `set-ngl N` / `set-parallel N` / `set-kv-type TYPE` / `set-flash-attn on│off│auto` / `set-flags "<str>"` | Targeted single-knob tweaks. Each restarts `llama-chat`. |
+| `llama set-embed <repo> <file>` | Swap embed model. Changing dimensions requires `restart --wipe-rag`. |
+| `llama logs <chat│embed> [-c <container>] [-f]` | Tail llama-chat / llama-embed pod logs. `-c pull-model` for the GGUF init container. |
+
+### App + integration plumbing
+
+| Command | Purpose |
+|---|---|
+| `app-provision <name>` | Run a per-app provisioning manifest — idempotent one-stop for buckets, image-pull secrets, repo secrets. |
+| `provision-s3-app <name>` | Create a Garage bucket + access key + Kubernetes Secret for one app. |
+| `add-image-pull-secret <namespace> <name>` | Provision an image-pull Secret for a private registry. |
+| `add-repo-secret <name>` | Register a git repository with Argo CD as a Repository Secret. |
+| `setup-slack` / `remove-slack` | Configure or remove Slack bot + app tokens for OpenClaw. |
+| `setup-telegram` / `remove-telegram` | Configure or remove Telegram bot token for OpenClaw. |
 | `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |
 | `approve-pairing <channel> <code>` | Approve a user's pairing request (e.g. `slack HPP2WU9B`). |
-| `status [--control H]` | `kubectl get nodes,pods -A` via SSH to the control node. |
-| `sync-upstream [--remote R] [--branch B]` | Fetch + merge upstream, re-apply placeholders. |
 
-Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
+### Private apps repos
+
+| Command | Purpose |
+|---|---|
+| `private-apps scaffold <path>` | Scaffold a starter private apps repo on disk. |
+| `private-apps setup --repo-url <url>` | Generate a deploy key, register the repo with Argo CD as an AppProject + root Application. |
+| `private-apps list` | List every registered private apps repo with sync/health status. |
+| `private-apps unregister --project-name <name>` | Remove the Argo Application + AppProject + Repository Secret. |
 
 ### What `prep.yml` does
 1. `base` on every targeted host — apt upgrade, utilities, unattended-upgrades, set hostname (then DHCP renew so the router registers `<name>`).
 2. `nvidia` on hosts in `[gpu]` — install driver (autodetected via `ubuntu-drivers`) + NVIDIA Container Toolkit. Auto-reboots if a new driver was installed.
+3. `storage` on hosts in `[storage]` — prepare the local-path storage directory + fstrim service.
 
 ### What `cluster.yml` does
-1. `k3s-server` on control — install k3s (pinned), capture join token.
-2. `k3s-agent` on every agent — join the cluster. GPU nodes also get the `nvidia.com/gpu=true` label + `NoSchedule` taint and containerd NVIDIA runtime config.
-3. `argocd` on control — install Argo CD (pinned), set `server.insecure=true` for HTTP Ingress, and apply the root Application.
+1. `k3s-server` on control — installs k3s, OR upgrades it in-place if `k3s_version` in `group_vars/all.yml` doesn't match what's on disk. Captures the join token. The `--check` mode (`bootstrap -- --check`) reports whether an upgrade would fire without performing it.
+2. `k3s-agent` on every agent — joins the cluster, OR upgrades in-place under the same version-mismatch rules as the server. GPU nodes also get the `nvidia.com/gpu=true` label + `NoSchedule` taint and containerd NVIDIA runtime config; storage nodes get `role=storage:NoSchedule`.
+3. `argocd` on control — installs Argo CD (pinned), sets `server.insecure=true` for HTTP Ingress, and applies the root Application of the app-of-apps tree.
 
 ## Repo layout
 
@@ -388,62 +493,85 @@ Run `./scripts/cluster_manager.py --help` (or `<cmd> --help`) for full options.
 ├── README.md
 ├── requirements.txt                    # Python deps for the CLI
 ├── scripts/
-│   ├── cluster_manager.py              # typer CLI
+│   ├── cluster_manager.py              # typer CLI (every command above)
 │   └── private_apps_template/          # starter content for `private-apps scaffold`
+├── rag-indexer/                        # Vault → ChromaDB indexer (built via CI)
+├── rag-mcp/                            # MCP server: search_notes, list_recent_notes, read_note
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── inventory.ini.example           # committed template (public)
 │   ├── inventory.ini                   # your real inventory (instance repo only)
-│   ├── prep.yml                        # per-node: base + nvidia
+│   ├── prep.yml                        # per-node: base + nvidia + storage
 │   ├── cluster.yml                     # cluster-wide: k3s + argocd
 │   ├── group_vars/all.yml              # pinned versions, apps_domain
 │   └── roles/
 │       ├── base/                       # apt, hostname, unattended-upgrades
 │       ├── nvidia/                     # GPU only; auto-reboots
-│       ├── k3s-server/
-│       ├── k3s-agent/                  # GPU variant adds label/taint/containerd
+│       ├── storage/                    # storage-node prep (local-path dir, fstrim)
+│       ├── k3s-server/                 # version-aware: install or in-place upgrade
+│       ├── k3s-agent/                  # version-aware; GPU variant adds label/taint/runtime
 │       └── argocd/                     # installs Argo CD, applies root Application
 └── clusters/
     └── default/
         ├── applications/
         │   ├── root.yaml               # app-of-apps, applied by Ansible
         │   └── children/               # reconciled by root
+        │       ├── argocd-ingress.yaml
+        │       ├── chromadb.yaml
         │       ├── cloudnative-pg.yaml  # CNPG operator (Helm; no Cluster CR)
-        │       ├── garage.yaml          # Single-node Garage, pinned to storage node
-        │       ├── openclaw.yaml
-        │       ├── obsidian-sync.yaml
-        │       ├── kube-prometheus-stack.yaml
-        │       ├── prometheus-crds.yaml
         │       ├── dcgm-exporter.yaml
-        │       ├── nvidia-device-plugin.yaml
+        │       ├── garage.yaml          # single-node Garage, pinned to storage node
+        │       ├── grafana-dashboards.yaml
+        │       ├── kube-prometheus-stack.yaml
+        │       ├── llama-cpp.yaml       # llama-chat + llama-embed pods
         │       ├── node-feature-discovery.yaml
-        │       └── argocd-ingress.yaml
+        │       ├── nvidia-device-plugin.yaml
+        │       ├── obsidian-sync.yaml
+        │       ├── openclaw.yaml
+        │       ├── prometheus-crds.yaml
+        │       ├── rag-indexer.yaml
+        │       ├── rag-mcp.yaml
+        │       └── traefik-tls.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
             ├── argocd-ingress/
-            ├── garage/                 # configmap + service + statefulset
-            ├── obsidian-sync/          # Headless Obsidian Sync for workspace
-            └── openclaw/
+            ├── chromadb/                # vector DB for the RAG pipeline
+            ├── garage/                  # configmap + service + statefulset
+            ├── grafana-dashboards/      # ConfigMap-shipped dashboards (LLM, GPU, nodes)
+            ├── llama-cpp/               # default ConfigMap + chat + embed deployments
+            ├── obsidian-sync/           # Headless Obsidian Sync for workspace
+            ├── openclaw/                # the agent gateway
+            ├── rag-indexer/             # CronJob/Deployment that indexes the vault
+            ├── rag-mcp/                 # MCP search server backed by ChromaDB
+            └── traefik-tls/             # wildcard TLS Secret for *.APPS_DOMAIN
 ```
 
 ## Version pinning
 
-All pinned in `ansible/group_vars/all.yml`:
+Versions live in two places:
 
-| Component | Version |
-|---|---|
-| k3s | `v1.35.3+k3s1` |
-| Argo CD | `v3.0.23` |
-| OpenClaw | `2026.4.22` |
-| ChromaDB | `1.5.8` |
-| NVIDIA device plugin Helm chart | `0.17.4` |
-| Node Feature Discovery Helm chart | `0.18.3` |
-| kube-prometheus-stack Helm chart | `83.6.0` |
-| Prometheus Operator CRDs Helm chart | `28.0.1` |
-| DCGM Exporter Helm chart | `4.4.1` |
-| CloudNativePG Helm chart | `0.24.0` |
-| Garage image | `dxflrs/garage:v1.2.0` |
+**`ansible/group_vars/all.yml`** — the pieces installed by the Ansible roles. Bumping a value here and re-running `./scripts/cluster_manager.py bootstrap` triggers an in-place upgrade on every node:
 
-Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
+| Component | Variable | Version |
+|---|---|---|
+| k3s | `k3s_version` | `v1.35.3+k3s1` |
+| Argo CD | `argocd_version` | `v3.0.23` |
+| OpenClaw | `openclaw_image` | `ghcr.io/openclaw/openclaw:2026.4.22` |
+| NVIDIA device plugin Helm chart | `nvidia_device_plugin_chart_version` | `0.17.4` |
+| Node Feature Discovery Helm chart | `nfd_chart_version` | `0.18.3` |
+
+**Per-app Argo Application manifests** (`clusters/default/applications/children/`) — Helm charts and images for everything Argo manages. Edit the `targetRevision` / `image` field in the relevant child YAML and Argo reconciles. Currently:
+
+| Component | Where | Version |
+|---|---|---|
+| kube-prometheus-stack | `children/kube-prometheus-stack.yaml` | `83.6.0` |
+| Prometheus Operator CRDs | `children/prometheus-crds.yaml` | `28.0.1` |
+| DCGM exporter | `children/dcgm-exporter.yaml` | `4.4.1` |
+| CloudNativePG operator | `children/cloudnative-pg.yaml` | `0.24.0` |
+| ChromaDB image | `apps/chromadb/deployment.yaml` | `1.5.8` |
+| Garage image | `apps/garage/statefulset.yaml` | `dxflrs/garage:v1.2.0` |
+| llama.cpp server (chat + embed) | `apps/llama-cpp/deployment-{chat,embed}.yaml` | `ghcr.io/ggml-org/llama.cpp:server-cuda-b8895` |
+
+Chat-model GGUF + tunables are deliberately NOT pinned in git — see [Local LLM stack](#local-llm-stack-architecture) below.
 
 ## Known sharp edges
 
@@ -470,13 +598,14 @@ Bump deliberately; re-run `./scripts/cluster_manager.py bootstrap` to apply.
 | Secrets | Kubernetes Secrets created imperatively by CLI (`setup-secrets`, `bootstrap-infra-secrets`) | Not in git; migrate to Sealed Secrets / ExternalSecrets later |
 | Private apps | Separate repo watched by Argo, wired up via `private-apps setup` | Keeps private/personal workloads out of the public template and any public instance forks |
 | Shared infra vs. apps | Operator + object store only in this repo; no `Cluster` CRs or buckets | Consumer apps (private) create their own DB clusters + buckets in their own namespaces |
-| Model management | Runtime-only via API | No model names in repo |
-| Version pinning | All in `group_vars/all.yml` | Reproducible re-runs |
+| Model management | Defaults in git (`llama-cpp-defaults`), per-deployment chat model in imperative `llama-cpp-model` ConfigMap | Upstream template carries no model opinion; CLI edits stick across Argo syncs |
+| Model weights | Pulled from HuggingFace by an init container, cached on a local-path PVC | First boot is a one-time download; rollouts reuse the cached blob |
+| Version pinning | Ansible-installed components in `group_vars/all.yml`, Argo-managed in per-app YAML | Each layer pinned at the point it's owned |
 
 ## Non-goals
 
 - HA control plane
 - Public internet exposure
 - CA-signed TLS (self-signed is sufficient for LAN)
-- Model pre-pulling / init containers
-- Backup of model weights
+- Backup of model weights (re-pull from HuggingFace if you need them after a node OS reinstall)
+- A frontier-class chat model in the box. The defaults work for ~14B-class GGUFs on a 16 GB GPU; bigger/better needs a bigger card or a hosted-API provider in OpenClaw.
