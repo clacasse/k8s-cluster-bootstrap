@@ -132,21 +132,26 @@ spec:
             requests:
               # The GPU node is dedicated to llama-chat — only system
               # DaemonSets (NFD, DCGM, device-plugin, node-exporter)
-              # and k3s-agent share it, totaling ~1-2 GiB. Request what
-              # we'll typically have resident (mmap'd GGUF + working set
-              # at peak prompt-cache snapshot) so the scheduler treats
-              # this pod as the heavyweight tenant the node was built for.
-              cpu: "2"
-              memory: 14Gi
+              # and k3s-agent share it, totaling ~1-2 GiB. With MoE
+              # models running --cpu-moe, expert weights live in host
+              # RAM (~15 GiB for 35B-A3B Q4_K_M) and CPU does the
+              # expert FFN math every token, so both numbers below
+              # reflect what we actually use during inference, not
+              # idle.
+              cpu: "4"
+              memory: 18Gi
               nvidia.com/gpu: "1"
             limits:
-              # Generous limit because the host has 32 GiB and is
-              # dedicated. 28 GiB lets prompt-cache snapshots, larger
-              # models, or higher-ctx settings land without OOMKills,
-              # while leaving 4 GiB for the OS + DaemonSets. Bump it if
-              # we ever try a model whose GGUF approaches 24 GB.
+              # Host has 32 GiB; reserve ~2 GiB for OS + DaemonSets
+              # and give the rest to llama-chat. Headroom matters for
+              # MoE: peak RSS = mmap'd experts (~15 GiB) + working
+              # buffers (~3 GiB) + prompt-cache snapshot spikes
+              # (+2-4 GiB transient) ≈ 20-24 GiB steady, ~26 GiB peak.
+              # The 30 GiB cap leaves ~4-6 GiB above peak so spikes
+              # don't OOMKill. Bump only if we move to a larger
+              # quant or push --ctx-size past 64k.
               cpu: "8"
-              memory: 28Gi
+              memory: 30Gi
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: models
