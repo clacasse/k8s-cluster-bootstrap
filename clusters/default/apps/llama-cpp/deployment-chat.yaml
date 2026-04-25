@@ -137,8 +137,10 @@ spec:
               # RAM (~15 GiB for 35B-A3B Q4_K_M) and CPU does the
               # expert FFN math every token, so both numbers below
               # reflect what we actually use during inference, not
-              # idle.
-              cpu: "4"
+              # idle. Request matches physical core count (9800X3D
+              # is 8C/16T) so the scheduler reserves what we need
+              # under load.
+              cpu: "8"
               memory: 18Gi
               nvidia.com/gpu: "1"
             limits:
@@ -150,7 +152,11 @@ spec:
               # The 30 GiB cap leaves ~4-6 GiB above peak so spikes
               # don't OOMKill. Bump only if we move to a larger
               # quant or push --ctx-size past 64k.
-              cpu: "8"
+              # CPU burst up to all 16 logical threads — SMT gives
+              # llama.cpp a modest 1.2-1.5x throughput bump on MoE
+              # expert FFN. No other workloads on this node, so
+              # there's nothing to share with.
+              cpu: "16"
               memory: 30Gi
               nvidia.com/gpu: "1"
           volumeMounts:
