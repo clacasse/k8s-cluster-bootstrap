@@ -130,20 +130,23 @@ spec:
             failureThreshold: 6
           resources:
             requests:
-              # All-GPU inference — CPU mostly serves the HTTP layer +
-              # mmap pages for the GGUF + prompt-cache state.
-              cpu: "1"
-              memory: 8Gi
+              # The GPU node is dedicated to llama-chat — only system
+              # DaemonSets (NFD, DCGM, device-plugin, node-exporter)
+              # and k3s-agent share it, totaling ~1-2 GiB. Request what
+              # we'll typically have resident (mmap'd GGUF + working set
+              # at peak prompt-cache snapshot) so the scheduler treats
+              # this pod as the heavyweight tenant the node was built for.
+              cpu: "2"
+              memory: 14Gi
               nvidia.com/gpu: "1"
             limits:
-              # The cgroup memory limit must comfortably exceed the
-              # GGUF size on disk + prompt-cache spikes. With qwen3.6-27b
-              # IQ4_XS at ~14 GB on the PVC, prompt-cache snapshots
-              # adding ~700 MiB per save, plus runtime overhead, 16 GiB
-              # gives headroom without being wasteful. Was 10 Gi (right
-              # for 14B Q5_K_M = 10 GB GGUF), too tight for 27B IQ4_XS.
-              cpu: "4"
-              memory: 16Gi
+              # Generous limit because the host has 32 GiB and is
+              # dedicated. 28 GiB lets prompt-cache snapshots, larger
+              # models, or higher-ctx settings land without OOMKills,
+              # while leaving 4 GiB for the OS + DaemonSets. Bump it if
+              # we ever try a model whose GGUF approaches 24 GB.
+              cpu: "8"
+              memory: 28Gi
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: models
