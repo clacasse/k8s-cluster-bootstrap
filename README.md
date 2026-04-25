@@ -602,7 +602,7 @@ Versions live in two places:
 |---|---|---|
 | k3s | `k3s_version` | `v1.35.3+k3s1` |
 | Argo CD | `argocd_version` | `v3.0.23` |
-| OpenClaw | `openclaw_image` | `ghcr.io/openclaw/openclaw:2026.4.22` |
+| OpenClaw | `openclaw_image` | `ghcr.io/openclaw/openclaw:2026.4.23` |
 | NVIDIA device plugin Helm chart | `nvidia_device_plugin_chart_version` | `0.17.4` |
 | Node Feature Discovery Helm chart | `nfd_chart_version` | `0.18.3` |
 

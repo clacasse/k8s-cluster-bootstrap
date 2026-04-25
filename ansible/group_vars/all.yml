@@ -4,7 +4,7 @@ k3s_version: "v1.35.3+k3s1"
 argocd_version: "v3.0.23"
 nvidia_device_plugin_chart_version: "0.17.4"
 nfd_chart_version: "0.18.3"
-openclaw_image: "ghcr.io/openclaw/openclaw:2026.4.22"
+openclaw_image: "ghcr.io/openclaw/openclaw:2026.4.23"
 
 # Cluster name used in the clusters/<name>/ directory layout.
 cluster_name: "default"
