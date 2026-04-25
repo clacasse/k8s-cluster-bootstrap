@@ -131,6 +131,104 @@ data:
               "legendFormat": "VRAM total ({{Hostname}})"
             }
           ]
+        },
+        {
+          "title": "llama-chat CPU Usage",
+          "description": "Container CPU consumption (cores). With --cpu-moe, expert FFN math runs on CPU every token, so this should rise to ~6-10 cores under sustained load. Was near-zero on the dense GPU-only model.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "short" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(container_cpu_usage_seconds_total{namespace=\"llama-cpp\",pod=~\"llama-chat-.*\",container=\"llama-server\"}[1m])",
+              "legendFormat": "{{pod}} cores"
+            }
+          ]
+        },
+        {
+          "title": "llama-chat CPU Throttling",
+          "description": "CFS throttling rate — non-zero means the container hit its CPU limit and got descheduled mid-token. Directly explains slow tok/s. If sustained, raise the CPU limit.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "s" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(container_cpu_cfs_throttled_seconds_total{namespace=\"llama-cpp\",pod=~\"llama-chat-.*\"}[1m])",
+              "legendFormat": "{{pod}} throttled s/s"
+            }
+          ]
+        },
+        {
+          "title": "llama-chat Memory: Working Set vs Page Cache",
+          "description": "Working set = RSS-equivalent that counts against the cgroup limit. Page cache = mmap'd file pages (where MoE expert weights live). With --cpu-moe most of the GGUF should show up as cache, with working set bounded by buffers + KV scratch + Node overhead. Limit line at 30 GiB for headroom check.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "bytes" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "container_memory_working_set_bytes{namespace=\"llama-cpp\",pod=~\"llama-chat-.*\",container=\"llama-server\"}",
+              "legendFormat": "{{pod}} working set"
+            },
+            {
+              "expr": "container_memory_cache{namespace=\"llama-cpp\",pod=~\"llama-chat-.*\",container=\"llama-server\"}",
+              "legendFormat": "{{pod}} page cache"
+            },
+            {
+              "expr": "kube_pod_container_resource_limits{namespace=\"llama-cpp\",pod=~\"llama-chat-.*\",container=\"llama-server\",resource=\"memory\"}",
+              "legendFormat": "{{pod}} limit"
+            }
+          ]
+        },
+        {
+          "title": "GPU Node Per-Core CPU Utilization",
+          "description": "Per-logical-core busy %. With 8C/16T on the 9800X3D, llama.cpp's MoE expert FFN should spread reasonably evenly. Hot bands on a subset of cores suggest the --threads / --threads-batch settings need tuning to use the rest.",
+          "type": "heatmap",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "percent" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "100 - (rate(node_cpu_seconds_total{instance=~\"k3s-gpu.*\",mode=\"idle\"}[1m]) * 100)",
+              "legendFormat": "core {{cpu}}",
+              "format": "time_series"
+            }
+          ]
+        },
+        {
+          "title": "GPU PCIe Throughput",
+          "description": "PCIe TX (GPU→host) and RX (host→GPU) bytes/sec. The MoE-on-CPU pattern shuttles activation vectors between GPU attention and CPU expert layers every token, so non-trivial sustained traffic during inference is expected. Below ~5 GB/s is healthy; pushing the PCIe 5.0 x16 ceiling (~16 GB/s) means PCIe is the bottleneck and gains from larger MoE quants would be limited.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "unit": "Bps" },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "DCGM_FI_PROF_PCIE_TX_BYTES{Hostname=~\"k3s-gpu.*\"}",
+              "legendFormat": "TX (GPU→host)"
+            },
+            {
+              "expr": "DCGM_FI_PROF_PCIE_RX_BYTES{Hostname=~\"k3s-gpu.*\"}",
+              "legendFormat": "RX (host→GPU)"
+            }
+          ]
         }
       ],
       "schemaVersion": 39,
