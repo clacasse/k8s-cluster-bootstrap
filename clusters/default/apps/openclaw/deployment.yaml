@@ -113,10 +113,6 @@ spec:
                     "microsoft":  {"enabled": false}
                   }
                 },
-                "tools": {
-                  "profile": "minimal",
-                  "allow": ["group:fs", "group:runtime", "bundle-mcp"]
-                },
                 "mcp": {
                   "servers": ${MCP_SERVERS}
                 }
