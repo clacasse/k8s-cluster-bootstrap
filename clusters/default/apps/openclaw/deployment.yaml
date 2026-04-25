@@ -102,7 +102,7 @@ spec:
                     },
                     "workspace": "/vault",
                     "compaction": {
-                      "reserveTokensFloor": 8000
+                      "reserveTokensFloor": 20000
                     }
                   }
                 },
