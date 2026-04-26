@@ -554,7 +554,12 @@ def sync_upstream(
 
     console.print("[green]Merge successful.[/green]")
 
-    repo_url = _get_repo_url()
+    # Use the raw remote URL (preserves SSH vs HTTPS as configured) so
+    # the substitution matches whatever init-fork wrote originally. The
+    # HTTPS-flattened _get_repo_url() form is for human-readable refs
+    # like deploy-key labels, NOT for Argo source URLs (which need to
+    # match the credential form Argo authenticates with).
+    repo_url = _get_repo_remote_url()
     apps_domain = _get_apps_domain()
 
     # Detect NFS server from existing manifests
