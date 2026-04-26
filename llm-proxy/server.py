@@ -45,6 +45,29 @@ def _log_event(event: dict) -> None:
         f.write(json.dumps(event, default=str) + "\n")
 
 
+def _strip_reasoning_content(messages: list) -> int:
+    """Remove `reasoning_content` from assistant messages, in place.
+
+    Thinking-model servers (Qwen3, DeepSeek, ...) emit a `reasoning_content`
+    field carrying the model's chain-of-thought. Clients like OpenClaw store
+    it and replay it in subsequent requests. The Qwen chat template then
+    decides per-render whether to wrap each prior message with `<think>`
+    blocks based on `last_query_index` — so the same message position
+    serializes differently turn-to-turn, blowing llama.cpp's prompt cache.
+
+    Stripping it before forwarding makes the rendered prefix immutable
+    across turns. The current turn still generates fresh thinking in its
+    response (which the client/UI displays); we only suppress *replay* of
+    prior turns' thinking.
+    """
+    stripped = 0
+    for m in messages:
+        if m.get("role") == "assistant" and "reasoning_content" in m:
+            del m["reasoning_content"]
+            stripped += 1
+    return stripped
+
+
 def _summarize_request(req: dict) -> dict:
     """Pull interesting bits out of a parsed OpenAI chat-completions body.
     We log the whole thing — messages, tools, params — so future analysis
@@ -111,10 +134,19 @@ async def proxy(request: Request, path: str) -> Response:
         "path": f"/v1/{path}",
     }
 
+    forward_body = body
     if body and request.headers.get("content-type", "").startswith("application/json"):
         try:
             parsed = json.loads(body)
             log_base.update(_summarize_request(parsed))
+            # Mutate request before forwarding: drop replayed reasoning_content
+            # so the upstream sees a stable rendered prefix turn-to-turn.
+            # Only meaningful for chat completions; harmless elsewhere.
+            if isinstance(parsed.get("messages"), list):
+                stripped = _strip_reasoning_content(parsed["messages"])
+                if stripped:
+                    log_base["reasoning_stripped"] = stripped
+                    forward_body = json.dumps(parsed).encode()
         except json.JSONDecodeError:
             log_base["body_raw"] = body[:1024].decode(errors="replace")
 
@@ -124,7 +156,7 @@ async def proxy(request: Request, path: str) -> Response:
         request.method,
         f"/v1/{path}",
         headers=headers,
-        content=body,
+        content=forward_body,
         params=dict(request.query_params),
     )
 
