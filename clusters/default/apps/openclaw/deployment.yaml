@@ -79,7 +79,7 @@ spec:
                 "models": {
                   "providers": {
                     "openai": {
-                      "baseUrl": "http://llama-chat.llama-cpp.svc.cluster.local:8080/v1",
+                      "baseUrl": "http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1",
                       "api": "openai-completions",
                       "models": [
                         {
@@ -154,7 +154,7 @@ spec:
             - name: OPENAI_API_KEY
               value: llama-local  # placeholder — llama.cpp has no real auth; this just enables the provider
             - name: OPENAI_BASE_URL
-              value: http://llama-chat.llama-cpp.svc.cluster.local:8080/v1
+              value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
             - name: OPENCLAW_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-proxy
+spec:
+  replicas: 1
+  strategy:
+    # Recreate (not rolling) because the PVC is RWO — only one pod can
+    # mount /var/log/llm-proxy at a time.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm-proxy
+  template:
+    metadata:
+      labels:
+        app: llm-proxy
+    spec:
+      containers:
+        - name: llm-proxy
+          image: ghcr.io/clacasse/k8s-cluster-bootstrap/llm-proxy:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Upstream is the actual inference server. Default is llama-chat
+            # in the same namespace; override here if you point at a vLLM
+            # service or external endpoint.
+            - name: UPSTREAM_URL
+              value: http://llama-chat.llama-cpp.svc.cluster.local:8080
+            - name: LOG_DIR
+              value: /var/log/llm-proxy
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            # Tiny — proxy just streams bytes. The httpx async client uses
+            # very little memory; spikes happen if a single non-streaming
+            # response holds the entire body in memory, but that's bounded
+            # by max_tokens (a few MB worst case).
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/llm-proxy
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: llm-proxy-logs

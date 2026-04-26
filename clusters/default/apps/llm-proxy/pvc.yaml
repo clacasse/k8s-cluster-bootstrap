@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-proxy-logs
+spec:
+  # Logs are append-only JSONL — modest size, but long-context turns can
+  # produce 100-500 KB rows so retention adds up. 10Gi gives ~weeks of
+  # an active session worth of detail before any rotation logic is needed.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi

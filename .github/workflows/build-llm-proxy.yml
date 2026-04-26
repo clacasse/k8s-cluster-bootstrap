@@ -1,0 +1,36 @@
+name: Build llm-proxy
+
+on:
+  push:
+    paths:
+      - "llm-proxy/**"
+      - ".github/workflows/build-llm-proxy.yml"
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: llm-proxy
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository }}/llm-proxy:latest
+            ghcr.io/${{ github.repository }}/llm-proxy:${{ github.sha }}
