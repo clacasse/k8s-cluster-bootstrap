@@ -236,6 +236,56 @@ def _image_repo(url: str) -> str:
     return f"{m.group(1)}/{m.group(2)}"
 
 
+def _build_template_substitutions(
+    repo_url: str,
+    apps_domain: str,
+    nfs_server: str | None,
+    prior_url: str | None = None,
+) -> dict[str, str]:
+    """Build the placeholder→value map applied to cluster manifests at
+    init-fork and sync-upstream time. Centralized so adding a placeholder
+    means changing one function instead of two call sites.
+
+    `prior_url` lets init-fork rewrite repoURL across a URL change (e.g.,
+    flipping HTTPS→SSH for going private). For sync-upstream, pass None —
+    a brand-new Application that arrives via merge with `repoURL: REPO_URL`
+    will get the placeholder substituted; manifests already pointing at
+    the fork's URL are no-ops.
+    """
+    if prior_url is None or prior_url == "REPO_URL":
+        repo_url_replacements = {"repoURL: REPO_URL": f"repoURL: {repo_url}"}
+    elif prior_url == repo_url:
+        repo_url_replacements = {}
+    else:
+        repo_url_replacements = {f"repoURL: {prior_url}": f"repoURL: {repo_url}"}
+
+    replacements = {
+        **repo_url_replacements,
+        "APPS_DOMAIN": apps_domain,
+        "IMAGE_REPO": _image_repo(repo_url),
+    }
+    if nfs_server and nfs_server != "none":
+        replacements["NFS_SERVER"] = nfs_server
+    return replacements
+
+
+def _apply_template_substitutions(replacements: dict[str, str]) -> int:
+    """Apply the substitution map to every YAML under CLUSTERS_DIR.
+    Returns the count of files modified, prints a checkmark per touch.
+    """
+    touched = 0
+    for yaml_path in CLUSTERS_DIR.rglob("*.yaml"):
+        text = yaml_path.read_text()
+        new_text = text
+        for old, new in replacements.items():
+            new_text = new_text.replace(old, new)
+        if new_text != text:
+            yaml_path.write_text(new_text)
+            touched += 1
+            console.print(f"  [green]✓[/green] {yaml_path.relative_to(REPO_DIR)}")
+    return touched
+
+
 def _get_ansible_user() -> str:
     """SSH user the Ansible playbooks connect as, read from the
     `ansible_user=` line in inventory.ini's `[all:vars]`. Falls back to
@@ -503,48 +553,22 @@ def init_fork(
     # root Argo Application — its repoURL is what Argo actually uses.
     # If it's still the placeholder, this is a first init; otherwise we're
     # converting from one URL to another (e.g., HTTPS -> SSH for going
-    # private). The replacement step rewrites every `repoURL: <prior>`
-    # match to the new URL — sibling repos referenced in the manifests
-    # (e.g. a deal-signal chart Application pointing at a different repo)
-    # are NOT touched because their repoURL line doesn't equal the prior.
+    # private). Sibling repos referenced in the manifests (e.g. a
+    # deal-signal chart Application pointing at a different repo) are
+    # NOT touched because the replacement is anchored at `repoURL: <prior>`.
     prior_url = _detect_current_repo_url()
-    if prior_url is None:
-        # First-init: just substitute the placeholder.
-        repo_url_replacements = {"repoURL: REPO_URL": f"repoURL: {repo_url}"}
-    elif prior_url == repo_url:
-        # Already initialized at this URL; no-op for the URL part.
-        repo_url_replacements = {}
+    if prior_url == repo_url:
         console.print(f"  [dim](repoURL is already {repo_url})[/dim]")
-    else:
-        # Conversion: rewrite the prior URL everywhere.
+    elif prior_url is not None:
         console.print(f"  Converting from prior repoURL: [yellow]{prior_url}[/yellow]")
-        repo_url_replacements = {f"repoURL: {prior_url}": f"repoURL: {repo_url}"}
 
-    replacements = {
-        **repo_url_replacements,
-        "APPS_DOMAIN": apps_domain,
-        # IMAGE_REPO mirrors GitHub Actions' `${{ github.repository }}`
-        # (owner/repo). The build workflows push images to
-        # `ghcr.io/${{ github.repository }}/<image>` automatically, so
-        # substituting the same path into deployment manifests lets a
-        # fork pull its own builds. Owner-only wouldn't be enough: a
-        # fork renamed during creation (e.g., upstream `k8s-cluster-
-        # bootstrap` forked to `my-cluster`) would still mismatch.
-        "IMAGE_REPO": image_repo,
-    }
-    if nfs_server != "none":
-        replacements["NFS_SERVER"] = nfs_server
-
-    touched = 0
-    for yaml_path in CLUSTERS_DIR.rglob("*.yaml"):
-        text = yaml_path.read_text()
-        new_text = text
-        for old, new in replacements.items():
-            new_text = new_text.replace(old, new)
-        if new_text != text:
-            yaml_path.write_text(new_text)
-            touched += 1
-            console.print(f"  [green]✓[/green] {yaml_path.relative_to(REPO_DIR)}")
+    replacements = _build_template_substitutions(
+        repo_url=repo_url,
+        apps_domain=apps_domain,
+        nfs_server=nfs_server,
+        prior_url=prior_url,
+    )
+    touched = _apply_template_substitutions(replacements)
 
     if _is_ssh_url(repo_url):
         _ensure_instance_deploy_key_and_prompt(repo_url)
@@ -624,23 +648,12 @@ def sync_upstream(
             break
 
     console.print(f"\nRe-applying placeholders (repoURL={repo_url}, domain={apps_domain})...")
-    replacements = {
-        "repoURL: REPO_URL": f"repoURL: {repo_url}",
-        "APPS_DOMAIN": apps_domain,
-    }
-    if nfs_server:
-        replacements["NFS_SERVER"] = nfs_server
-
-    touched = 0
-    for yaml_path in CLUSTERS_DIR.rglob("*.yaml"):
-        text = yaml_path.read_text()
-        new_text = text
-        for old, new in replacements.items():
-            new_text = new_text.replace(old, new)
-        if new_text != text:
-            yaml_path.write_text(new_text)
-            touched += 1
-            console.print(f"  [green]✓[/green] {yaml_path.relative_to(REPO_DIR)}")
+    replacements = _build_template_substitutions(
+        repo_url=repo_url,
+        apps_domain=apps_domain,
+        nfs_server=nfs_server,
+    )
+    touched = _apply_template_substitutions(replacements)
 
     if touched > 0:
         _run(["git", "add", str(CLUSTERS_DIR)], cwd=REPO_DIR)
