@@ -90,6 +90,7 @@ spec:
                 --parallel "${CHAT_PARALLEL_SLOTS}" \
                 -ctk "${CHAT_KV_TYPE}" -ctv "${CHAT_KV_TYPE}" \
                 --flash-attn "${CHAT_FLASH_ATTN}" \
+                --reasoning-budget "${CHAT_REASONING_BUDGET}" \
                 --metrics --jinja \
                 ${CHAT_EXTRA_FLAGS}
           envFrom:

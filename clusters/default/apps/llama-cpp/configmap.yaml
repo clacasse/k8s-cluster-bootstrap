@@ -42,6 +42,14 @@ data:
   CHAT_PARALLEL_SLOTS: "1"
   CHAT_KV_TYPE: "q8_0"             # KV cache dtype; applied to both K and V
   CHAT_FLASH_ATTN: "on"            # Blackwell/Ada have it; Ampere partial
+  # Token budget for thinking models (Qwen3, DeepSeek-R1, ...): -1 unrestricted,
+  # 0 = immediate end-of-thinking. Default 0 because thinking-block tokens
+  # generated during one turn don't match the chat template's rendering of
+  # those same messages on the *next* turn (the template strips/wraps think
+  # blocks based on position), which invalidates llama.cpp's prompt cache and
+  # forces multi-thousand-token reprocess every agent loop iteration. Set to
+  # -1 if you want full CoT and don't mind the cache hit.
+  CHAT_REASONING_BUDGET: "0"
   CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
 
   # --- Embedding model ---
