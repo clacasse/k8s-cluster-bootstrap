@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: llm-proxy
-          image: ghcr.io/REGISTRY_OWNER/k8s-cluster-bootstrap/llm-proxy:latest
+          image: ghcr.io/IMAGE_REPO/llm-proxy:latest
           ports:
             - name: http
               containerPort: 8080

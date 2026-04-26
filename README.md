@@ -131,7 +131,7 @@ In future sessions: `source .venv/bin/activate` before running the CLI.
 
 ### 3. Initialize placeholders
 
-This rewrites `REPO_URL`, `APPS_DOMAIN`, and `REGISTRY_OWNER` in the cluster manifests to point at your instance repo, your LAN domain, and your GHCR namespace. The container-registry substitution lets the bundled apps (`llm-proxy`, `rag-indexer`, `rag-mcp`) pull images from your fork's own GHCR — the GitHub Actions workflows in this template push to `ghcr.io/${{ github.repository }}/<name>` automatically, so the fork builds and the deployment manifests stay in sync. It prompts for the domain (default: `apps`).
+This rewrites `REPO_URL`, `APPS_DOMAIN`, and `IMAGE_REPO` in the cluster manifests to point at your instance repo, your LAN domain, and your GHCR namespace. The container-registry substitution lets the bundled apps (`llm-proxy`, `rag-indexer`, `rag-mcp`) pull images from your fork's own GHCR — the GitHub Actions workflows in this template push to `ghcr.io/${{ github.repository }}/<name>` automatically, and `IMAGE_REPO` substitutes to that same `<owner>/<repo>` so deployments and builds stay in sync. It prompts for the domain (default: `apps`).
 
 ```bash
 ./scripts/cluster_manager.py init-fork

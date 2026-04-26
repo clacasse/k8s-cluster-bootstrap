@@ -217,20 +217,23 @@ def _instance_repo_name(url: str) -> str:
     return m.group(1)
 
 
-def _repo_owner(url: str) -> str:
-    """Owner segment of a GitHub-style git URL — the username/org that
-    namespaces the repo. Used to fill the REGISTRY_OWNER placeholder so
-    a fork's deployment manifests pull container images from the fork's
-    own GHCR namespace instead of upstream's.
+def _image_repo(url: str) -> str:
+    """OWNER/REPO_NAME from a GitHub-style git URL — exactly what the
+    GitHub Actions context `${{ github.repository }}` evaluates to.
+    Used to fill the IMAGE_REPO placeholder so deployment manifests pull
+    fork-built images from the same path the build workflow pushes them
+    to. Without this, a fork named anything other than the upstream's
+    repo name would push to `ghcr.io/<owner>/<fork-name>/<image>` but
+    the manifests would still hardcode the upstream repo name.
 
-    git@github.com:user/foo.git              -> user
-    https://github.com/user/foo              -> user
-    https://github.com/user/foo.git          -> user
+    git@github.com:user/foo.git              -> user/foo
+    https://github.com/user/foo              -> user/foo
+    https://github.com/user/foo.git          -> user/foo
     """
-    m = re.search(r"[:/]([^/:]+)/[^/:]+?(?:\.git)?/?$", url)
+    m = re.search(r"[:/]([^/:]+)/([^/:]+?)(?:\.git)?/?$", url)
     if not m:
-        raise ValueError(f"can't derive repo owner from {url!r}")
-    return m.group(1)
+        raise ValueError(f"can't derive image repo from {url!r}")
+    return f"{m.group(1)}/{m.group(2)}"
 
 
 def _get_ansible_user() -> str:
@@ -488,11 +491,11 @@ def init_fork(
         default="none",
     )
 
-    registry_owner = _repo_owner(repo_url)
+    image_repo = _image_repo(repo_url)
 
     console.print(f"Setting repoURL to:     [cyan]{repo_url}[/cyan]")
     console.print(f"Setting apps domain to: [cyan]{apps_domain}[/cyan]")
-    console.print(f"Setting image registry: [cyan]ghcr.io/{registry_owner}/...[/cyan]")
+    console.print(f"Setting image registry: [cyan]ghcr.io/{image_repo}/...[/cyan]")
     if nfs_server != "none":
         console.print(f"Setting NFS server to:  [cyan]{nfs_server}[/cyan]")
 
@@ -520,13 +523,14 @@ def init_fork(
     replacements = {
         **repo_url_replacements,
         "APPS_DOMAIN": apps_domain,
-        # REGISTRY_OWNER lets fork-built images (llm-proxy, rag-indexer,
-        # rag-mcp) land in the fork's own GHCR namespace — workflows push
-        # to `ghcr.io/${{ github.repository }}/<name>` automatically, and
-        # this substitution flips the deployment manifests to pull from
-        # the same place. Without it, forks would push to their own
-        # registry but Argo would still pull from upstream's.
-        "REGISTRY_OWNER": registry_owner,
+        # IMAGE_REPO mirrors GitHub Actions' `${{ github.repository }}`
+        # (owner/repo). The build workflows push images to
+        # `ghcr.io/${{ github.repository }}/<image>` automatically, so
+        # substituting the same path into deployment manifests lets a
+        # fork pull its own builds. Owner-only wouldn't be enough: a
+        # fork renamed during creation (e.g., upstream `k8s-cluster-
+        # bootstrap` forked to `my-cluster`) would still mismatch.
+        "IMAGE_REPO": image_repo,
     }
     if nfs_server != "none":
         replacements["NFS_SERVER"] = nfs_server
