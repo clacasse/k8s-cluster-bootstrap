@@ -160,6 +160,16 @@ async def proxy(request: Request, path: str) -> Response:
         params=dict(request.query_params),
     )
 
+    # Latency budget breakdown:
+    #   forward_lag_ms = receive → upstream send  (proxy's own overhead:
+    #                    JSON parse, reasoning strip, reserialize, build_request)
+    #   upstream_lag_ms = upstream send → first byte from llama-cpp
+    #                     (queue + prompt eval + first-token gen)
+    #   ttft_ms = receive → first byte (sum of the two)
+    # Splitting them lets us tell "proxy is slow" from "llama is slow"
+    # from "OpenClaw was slow before calling us at all".
+    t_send = time.monotonic()
+
     if is_streaming:
         # SSE pass-through. Capture time-to-first-token (TTFT) — that's the
         # number that actually matters for "agent feels slow." We don't
@@ -167,18 +177,23 @@ async def proxy(request: Request, path: str) -> Response:
         # detail.
         async def stream_response():
             ttft_ms: int | None = None
+            upstream_lag_ms: int | None = None
             chunk_count = 0
             try:
                 resp = await client.send(upstream_req, stream=True)
                 async for chunk in resp.aiter_raw():
                     if chunk and ttft_ms is None:
-                        ttft_ms = int((time.monotonic() - start) * 1000)
+                        now = time.monotonic()
+                        ttft_ms = int((now - start) * 1000)
+                        upstream_lag_ms = int((now - t_send) * 1000)
                     chunk_count += 1
                     yield chunk
                 await resp.aclose()
             finally:
                 _log_event({
                     **log_base,
+                    "forward_lag_ms": int((t_send - start) * 1000),
+                    "upstream_lag_ms": upstream_lag_ms,
                     "ttft_ms": ttft_ms,
                     "total_ms": int((time.monotonic() - start) * 1000),
                     "chunk_count": chunk_count,
@@ -194,9 +209,12 @@ async def proxy(request: Request, path: str) -> Response:
     # only emits at the end. For SSE responses we'd have to parse chunks
     # to recover the same numbers; not worth the complexity right now.
     resp = await client.send(upstream_req)
+    upstream_lag_ms = int((time.monotonic() - t_send) * 1000)
     total_ms = int((time.monotonic() - start) * 1000)
     log_record: dict = {
         **log_base,
+        "forward_lag_ms": int((t_send - start) * 1000),
+        "upstream_lag_ms": upstream_lag_ms,
         "total_ms": total_ms,
         "status": resp.status_code,
     }
