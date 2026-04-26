@@ -217,6 +217,39 @@ def _instance_repo_name(url: str) -> str:
     return m.group(1)
 
 
+def _repo_owner(url: str) -> str:
+    """Owner segment of a GitHub-style git URL — the username/org that
+    namespaces the repo. Used to fill the REGISTRY_OWNER placeholder so
+    a fork's deployment manifests pull container images from the fork's
+    own GHCR namespace instead of upstream's.
+
+    git@github.com:user/foo.git              -> user
+    https://github.com/user/foo              -> user
+    https://github.com/user/foo.git          -> user
+    """
+    m = re.search(r"[:/]([^/:]+)/[^/:]+?(?:\.git)?/?$", url)
+    if not m:
+        raise ValueError(f"can't derive repo owner from {url!r}")
+    return m.group(1)
+
+
+def _get_ansible_user() -> str:
+    """SSH user the Ansible playbooks connect as, read from the
+    `ansible_user=` line in inventory.ini's `[all:vars]`. Falls back to
+    `ubuntu` (the template default) if inventory.ini doesn't exist yet
+    — matters for `remove-node`, which may run before/around bootstrap
+    where the inventory is in transitional states.
+    """
+    inv = ANSIBLE_DIR / "inventory.ini"
+    if not inv.exists():
+        return "ubuntu"
+    for line in inv.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("ansible_user="):
+            return s.split("=", 1)[1].strip()
+    return "ubuntu"
+
+
 def _instance_repo_key_path(url: str) -> Path:
     """Conventional path for the instance repo's Argo deploy key.
     Lives under ~/.ssh so it never gets committed; the public key gets
@@ -455,8 +488,11 @@ def init_fork(
         default="none",
     )
 
+    registry_owner = _repo_owner(repo_url)
+
     console.print(f"Setting repoURL to:     [cyan]{repo_url}[/cyan]")
     console.print(f"Setting apps domain to: [cyan]{apps_domain}[/cyan]")
+    console.print(f"Setting image registry: [cyan]ghcr.io/{registry_owner}/...[/cyan]")
     if nfs_server != "none":
         console.print(f"Setting NFS server to:  [cyan]{nfs_server}[/cyan]")
 
@@ -481,7 +517,17 @@ def init_fork(
         console.print(f"  Converting from prior repoURL: [yellow]{prior_url}[/yellow]")
         repo_url_replacements = {f"repoURL: {prior_url}": f"repoURL: {repo_url}"}
 
-    replacements = {**repo_url_replacements, "APPS_DOMAIN": apps_domain}
+    replacements = {
+        **repo_url_replacements,
+        "APPS_DOMAIN": apps_domain,
+        # REGISTRY_OWNER lets fork-built images (llm-proxy, rag-indexer,
+        # rag-mcp) land in the fork's own GHCR namespace — workflows push
+        # to `ghcr.io/${{ github.repository }}/<name>` automatically, and
+        # this substitution flips the deployment manifests to pull from
+        # the same place. Without it, forks would push to their own
+        # registry but Argo would still pull from upstream's.
+        "REGISTRY_OWNER": registry_owner,
+    }
     if nfs_server != "none":
         replacements["NFS_SERVER"] = nfs_server
 
@@ -726,9 +772,10 @@ def remove_node(
                 break
 
     if node_host:
+        ansible_user = _get_ansible_user()
         console.print(f"Uninstalling k3s on {hostname} ({node_host})...")
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=10", f"clacasse@{node_host}",
+            ["ssh", "-o", "ConnectTimeout=10", f"{ansible_user}@{node_host}",
              "sudo /usr/local/bin/k3s-agent-uninstall.sh"],
             capture_output=True, timeout=30,
         )
@@ -1952,8 +1999,8 @@ PRIVATE_APPS_MANAGED_LABEL = "cluster-manager/private-apps"
 def _derive_project_name(repo_url: str) -> str:
     """Derive a project name from a git SSH URL.
 
-    git@github.com:clacasse/fieldstone-private-apps.git  →  fieldstone-private-apps
-    ssh://git@host/org/repo.git                          →  repo
+    git@github.com:you/my-private-apps.git  →  my-private-apps
+    ssh://git@host/org/repo.git             →  repo
     """
     match = re.search(r"[:/]([^/]+?)(?:\.git)?/?$", repo_url)
     if not match:

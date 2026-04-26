@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: rag-indexer
-          image: ghcr.io/clacasse/k8s-cluster-bootstrap/rag-indexer:latest
+          image: ghcr.io/REGISTRY_OWNER/k8s-cluster-bootstrap/rag-indexer:latest
           env:
             - name: VAULT_PATH
               value: /vault

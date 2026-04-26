@@ -131,7 +131,7 @@ In future sessions: `source .venv/bin/activate` before running the CLI.
 
 ### 3. Initialize placeholders
 
-This rewrites `REPO_URL` and `APPS_DOMAIN` in the cluster manifests to point at your instance repo and your LAN domain. It prompts for the domain (default: `apps`).
+This rewrites `REPO_URL`, `APPS_DOMAIN`, and `REGISTRY_OWNER` in the cluster manifests to point at your instance repo, your LAN domain, and your GHCR namespace. The container-registry substitution lets the bundled apps (`llm-proxy`, `rag-indexer`, `rag-mcp`) pull images from your fork's own GHCR — the GitHub Actions workflows in this template push to `ghcr.io/${{ github.repository }}/<name>` automatically, so the fork builds and the deployment manifests stay in sync. It prompts for the domain (default: `apps`).
 
 ```bash
 ./scripts/cluster_manager.py init-fork
@@ -273,7 +273,22 @@ Every per-deployment knob is a first-class field with validation, exposed via de
 | `CHAT_PARALLEL_SLOTS` | `--parallel N` / `set-parallel N` | 1 | Concurrent request slots; raising shrinks per-request ctx |
 | `CHAT_KV_TYPE` | `--kv-type T` / `set-kv-type T` | q8_0 | KV cache dtype: `q8_0`, `q4_0`, `q5_0`, `f16` |
 | `CHAT_FLASH_ATTN` | `--flash-attn V` / `set-flash-attn V` | on | `on`, `off`, `auto` |
+| `CHAT_REASONING_BUDGET` | (configmap edit) | 0 | Token budget for thinking models. `0` = no thinking, `-1` = unrestricted. Default 0 because thinking-block tokens generated in one turn don't render identically on the next, blowing llama.cpp's prompt cache. |
 | `CHAT_EXTRA_FLAGS` | `--flags STR` / `set-flags "<str>"` | "" | Escape hatch: `--rope-scaling`, `--override-tensor`, sampling defaults, etc. |
+
+### Tuning for your hardware
+
+The pod's resource block in [`clusters/default/apps/llama-cpp/deployment-chat.yaml`](./clusters/default/apps/llama-cpp/deployment-chat.yaml) is sized for a single-purpose GPU node with **8+ CPU cores, 32 GB host RAM, and a 16 GB-class GPU** running an MoE model with `--cpu-moe` (expert weights in host RAM). If your GPU node is smaller, edit those numbers down before bootstrap or your llama-chat pod will OOMKill on first start.
+
+| Constraint | What to change |
+|---|---|
+| Less than 16 GB VRAM | Lower `CHAT_GPU_LAYERS` (`llama set-ngl N`) for partial CPU offload, or pick a smaller-quant GGUF in `llama setup` |
+| Less than 32 GB host RAM | Lower `resources.limits.memory` to ~70% of available, lower `requests.memory` proportionally (deployment-chat.yaml lines ~131-161) |
+| Fewer CPU cores | Lower `resources.requests.cpu` and `limits.cpu` to your physical core count |
+| Other workloads on the GPU node | Tighten the resource block so the scheduler leaves room |
+| Thinking model + long agent loops | Keep `CHAT_REASONING_BUDGET=0` (default). Set to `-1` only if you genuinely need CoT and can absorb the cache invalidation per turn |
+
+The CLI knobs (`set-ctx`, `set-ngl`, `set-parallel`, etc.) survive Argo syncs because they write to the imperative `llama-cpp-model` ConfigMap, not the git-managed defaults.
 
 ## Day-to-day operations
 

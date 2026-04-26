@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: rag-mcp
-          image: ghcr.io/clacasse/k8s-cluster-bootstrap/rag-mcp:latest
+          image: ghcr.io/REGISTRY_OWNER/k8s-cluster-bootstrap/rag-mcp:latest
           ports:
             - name: http
               containerPort: 8080
