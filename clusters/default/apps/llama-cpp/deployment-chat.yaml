@@ -75,11 +75,24 @@ spec:
                 echo "[llama-chat] Run: cluster_manager.py llama setup" >&2
                 exit 1
               fi
+              # Conditional flags. --cpu-moe is presence-only and
+              # --override-tensor is meaningful only when set; build them
+              # into args strings so an empty/off value emits no flag at
+              # all (avoids `--override-tensor ""` which llama-server
+              # rejects as an empty regex).
+              moe_args=""
+              case "${CHAT_CPU_MOE:-off}" in
+                on|true|1) moe_args="--cpu-moe" ;;
+              esac
+              override_args=""
+              if [ -n "${CHAT_OVERRIDE_TENSOR:-}" ]; then
+                override_args="--override-tensor ${CHAT_OVERRIDE_TENSOR}"
+              fi
               # Flags composed from named ConfigMap fields so each is
               # discoverable + individually tunable via `llama set-*`.
               # CHAT_EXTRA_FLAGS is the escape hatch for anything not
               # yet promoted to its own field (e.g. --rope-scaling,
-              # --override-tensor, sampling defaults).
+              # sampling defaults).
               exec /app/llama-server \
                 --model "/models/${CHAT_MODEL_FILE}" \
                 --alias "${CHAT_SERVED_MODEL}" \
@@ -93,6 +106,8 @@ spec:
                 --reasoning-budget "${CHAT_REASONING_BUDGET}" \
                 --repeat-penalty "${CHAT_REPEAT_PENALTY}" \
                 --repeat-last-n "${CHAT_REPEAT_LAST_N}" \
+                ${moe_args} \
+                ${override_args} \
                 --metrics --jinja \
                 ${CHAT_EXTRA_FLAGS}
           envFrom:

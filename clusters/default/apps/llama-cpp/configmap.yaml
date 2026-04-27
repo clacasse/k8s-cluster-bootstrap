@@ -69,6 +69,26 @@ data:
   # but the cost rises with the window.
   CHAT_REPEAT_LAST_N: "64"
 
+  # --- MoE expert offloading ---
+  # `on` adds --cpu-moe so MoE expert FFN tensors stay in host RAM and
+  # only the shared/attention path lives on GPU. This is what lets a
+  # ~35B-param MoE (e.g. Qwen3-A3B's 35B/3B-active) run on a 16 GB-class
+  # GPU at all: dense attention + router on-device, expert weights memory-
+  # mapped from the GGUF in CPU RAM, dispatched per-token. Cost is the
+  # decode-rate hit from CPU FFN math (still fast on a Zen 5 / 9800X3D)
+  # and the host RAM footprint of the experts (~15 GiB for 35B-A3B Q4_K_M).
+  # `off` for dense models — they fit fully on GPU and don't need this.
+  CHAT_CPU_MOE: "off"
+  # Lower-level placement override. llama.cpp regex matches tensor names
+  # and pins matches to the named device. Use this when --cpu-moe's blanket
+  # "all experts to CPU" is too coarse — e.g. keep the first N expert
+  # layers on GPU for latency, push the rest to CPU. Empty by default
+  # because --cpu-moe covers the common case; only reach for this when
+  # profiling shows a specific layer pattern would help.
+  # Example: '\.ffn_.*_exps\.=CPU' (== --cpu-moe). Quote-safe regex only
+  # — passed unquoted into the exec line.
+  CHAT_OVERRIDE_TENSOR: ""
+
   CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
 
   # --- Embedding model ---

@@ -1214,6 +1214,8 @@ _LLAMA_CHAT_KEYS = (
     "CHAT_PARALLEL_SLOTS",
     "CHAT_KV_TYPE",
     "CHAT_FLASH_ATTN",
+    "CHAT_CPU_MOE",
+    "CHAT_OVERRIDE_TENSOR",
     "CHAT_EXTRA_FLAGS",
 )
 # Keys in llama-cpp-defaults for the embed model. `llama set-embed`
@@ -1231,6 +1233,8 @@ _LLAMA_CHAT_PROMPTS = {
     "CHAT_PARALLEL_SLOTS": "Parallel request slots",
     "CHAT_KV_TYPE":        "KV cache quantization (q8_0 / q4_0 / q5_0 / f16)",
     "CHAT_FLASH_ATTN":     "Flash attention (on / off / auto)",
+    "CHAT_CPU_MOE":        "Offload MoE expert tensors to CPU/RAM (on / off)",
+    "CHAT_OVERRIDE_TENSOR": "Tensor placement regex (empty = none, advanced)",
     "CHAT_EXTRA_FLAGS":    "Extra llama-server flags (optional)",
 }
 
@@ -1239,6 +1243,9 @@ _LLAMA_CHAT_PROMPTS = {
 # typo.
 _VALID_KV_TYPES = ("q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "f16", "f32")
 _VALID_FLASH_ATTN = ("on", "off", "auto")
+# CHAT_CPU_MOE is parsed by the deployment shell as on/true/1 = enable,
+# anything else = off. Accept the same vocabulary here for consistency.
+_VALID_CPU_MOE = ("on", "off", "true", "false", "1", "0")
 
 
 def _validate_chat_field(key: str, value: str) -> None:
@@ -1251,6 +1258,10 @@ def _validate_chat_field(key: str, value: str) -> None:
     if key == "CHAT_FLASH_ATTN" and value not in _VALID_FLASH_ATTN:
         raise typer.BadParameter(
             f"CHAT_FLASH_ATTN must be one of {list(_VALID_FLASH_ATTN)}, got {value!r}"
+        )
+    if key == "CHAT_CPU_MOE" and value not in _VALID_CPU_MOE:
+        raise typer.BadParameter(
+            f"CHAT_CPU_MOE must be one of {list(_VALID_CPU_MOE)}, got {value!r}"
         )
     if key in ("CHAT_CTX_SIZE", "CHAT_GPU_LAYERS", "CHAT_PARALLEL_SLOTS"):
         try:
@@ -1475,6 +1486,8 @@ _LLAMA_SETUP_DEFAULTS = {
     "CHAT_PARALLEL_SLOTS": "1",
     "CHAT_KV_TYPE":        "q8_0",
     "CHAT_FLASH_ATTN":     "on",
+    "CHAT_CPU_MOE":        "off",
+    "CHAT_OVERRIDE_TENSOR": "",
     "CHAT_EXTRA_FLAGS":    "",
 }
 
@@ -1489,6 +1502,8 @@ def llama_setup(
     parallel: str = typer.Option(None, "--parallel", help="Concurrent request slots."),
     kv_type: str = typer.Option(None, "--kv-type", help=f"One of {list(_VALID_KV_TYPES)}."),
     flash_attn: str = typer.Option(None, "--flash-attn", help=f"One of {list(_VALID_FLASH_ATTN)}."),
+    cpu_moe: str = typer.Option(None, "--cpu-moe", help=f"Offload MoE experts to CPU/RAM. One of {list(_VALID_CPU_MOE)}."),
+    override_tensor: str = typer.Option(None, "--override-tensor", help="Tensor placement regex (advanced)."),
     extra_flags: str = typer.Option(None, "--flags", help="Extra llama-server flags."),
     restart: bool = typer.Option(True, "--restart/--no-restart"),
     force: bool = typer.Option(False, "--force", help="Re-prompt for every key, even those already set."),
@@ -1530,6 +1545,8 @@ def llama_setup(
         "CHAT_PARALLEL_SLOTS": parallel,
         "CHAT_KV_TYPE":        kv_type,
         "CHAT_FLASH_ATTN":     flash_attn,
+        "CHAT_CPU_MOE":        cpu_moe,
+        "CHAT_OVERRIDE_TENSOR": override_tensor,
         "CHAT_EXTRA_FLAGS":    extra_flags,
     }
 
@@ -1617,6 +1634,8 @@ def llama_set_chat(
     parallel: str = typer.Option(None, "--parallel", help="Concurrent request slots."),
     kv_type: str = typer.Option(None, "--kv-type", help=f"One of {list(_VALID_KV_TYPES)}."),
     flash_attn: str = typer.Option(None, "--flash-attn", help=f"One of {list(_VALID_FLASH_ATTN)}."),
+    cpu_moe: str = typer.Option(None, "--cpu-moe", help=f"Offload MoE experts to CPU/RAM. One of {list(_VALID_CPU_MOE)}."),
+    override_tensor: str = typer.Option(None, "--override-tensor", help="Tensor placement regex (advanced)."),
     flags: str = typer.Option(None, "--flags", help="Replace CHAT_EXTRA_FLAGS (escape hatch)."),
     keep_alias: bool = typer.Option(
         False, "--keep-alias",
@@ -1659,6 +1678,8 @@ def llama_set_chat(
         "CHAT_PARALLEL_SLOTS": parallel,
         "CHAT_KV_TYPE":        kv_type,
         "CHAT_FLASH_ATTN":     flash_attn,
+        "CHAT_CPU_MOE":        cpu_moe,
+        "CHAT_OVERRIDE_TENSOR": override_tensor,
         "CHAT_EXTRA_FLAGS":    flags,
     }
     for key, val in opt_map.items():
@@ -1782,14 +1803,43 @@ def llama_set_flash_attn(
     _llama_set_single(control, "CHAT_FLASH_ATTN", mode)
 
 
+@llama_app.command("set-cpu-moe")
+def llama_set_cpu_moe(
+    mode: str = typer.Argument(..., help=f"One of {list(_VALID_CPU_MOE)}."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Toggle --cpu-moe — pin MoE expert tensors to host RAM instead of VRAM.
+    `on` for MoE models on a GPU that can't hold all experts (e.g. Qwen3-A3B
+    on a 16 GB card); `off` for dense models that fit on the GPU.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_CPU_MOE", mode)
+
+
+@llama_app.command("set-override-tensor")
+def llama_set_override_tensor(
+    regex: str = typer.Argument(..., help="Tensor placement regex; empty string clears."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Set --override-tensor — fine-grained control over which tensors live
+    on which device. Reach for this when --cpu-moe's blanket pattern is too
+    coarse (e.g. keep first N expert layers on GPU, rest on CPU). Pass an
+    empty string to clear.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_OVERRIDE_TENSOR", regex)
+
+
 @llama_app.command("set-flags")
 def llama_set_flags(
     flags: str = typer.Argument(..., help="Full replacement for CHAT_EXTRA_FLAGS."),
     control: str = typer.Option(None, "--control", "-c"),
 ) -> None:
     """Replace CHAT_EXTRA_FLAGS — the escape hatch for any llama-server
-    flag not yet promoted to a named field (--rope-*, --override-tensor,
-    sampling defaults, etc.).
+    flag not yet promoted to a named field (--rope-*, sampling defaults,
+    etc.).
     """
     if control is None:
         control = _get_control_host()

@@ -276,7 +276,9 @@ Every per-deployment knob is a first-class field with validation, exposed via de
 | `CHAT_REASONING_BUDGET` | (configmap edit) | 0 | Token budget for thinking models. `0` = no thinking, `-1` = unrestricted. Default 0 because thinking-block tokens generated in one turn don't render identically on the next, blowing llama.cpp's prompt cache. |
 | `CHAT_REPEAT_PENALTY` | (configmap edit) | 1.15 | Sampling penalty for repeated tokens. Tames Qwen3-A3B's degenerate-loop tendency on short-reply tasks (`HEARTBEAT_OKNO_REPLYNO_REPLY...`). Conservative band 1.0–1.3; >1.3 breaks legitimate repetition (proper nouns, boilerplate). |
 | `CHAT_REPEAT_LAST_N` | (configmap edit) | 64 | Lookback window for the repeat penalty. Higher catches longer-range repetition; sampling cost rises linearly with the window. |
-| `CHAT_EXTRA_FLAGS` | `--flags STR` / `set-flags "<str>"` | "" | Escape hatch: `--rope-scaling`, `--override-tensor`, etc. — anything not yet promoted to its own field. |
+| `CHAT_CPU_MOE` | `--cpu-moe V` / `set-cpu-moe V` | off | `on` adds `--cpu-moe`: MoE expert FFN tensors stay in host RAM, only attention/router on GPU. Required to fit a 35B-class MoE on a 16 GB card. `off` for dense models. |
+| `CHAT_OVERRIDE_TENSOR` | `--override-tensor REGEX` / `set-override-tensor "<re>"` | "" | Tensor placement regex (advanced). Use when `--cpu-moe`'s blanket pattern is too coarse — e.g. keep first N expert layers on GPU. |
+| `CHAT_EXTRA_FLAGS` | `--flags STR` / `set-flags "<str>"` | "" | Escape hatch: `--rope-scaling`, etc. — anything not yet promoted to its own field. |
 
 ### Tuning for your hardware
 
