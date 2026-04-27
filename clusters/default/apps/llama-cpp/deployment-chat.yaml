@@ -84,6 +84,11 @@ spec:
               case "${CHAT_CPU_MOE:-off}" in
                 on|true|1) moe_args="--cpu-moe" ;;
               esac
+              # --n-cpu-moe is the partial-offload variant; only emit when
+              # > 0 and only when --cpu-moe isn't already pinning everything.
+              if [ -z "${moe_args}" ] && [ "${CHAT_N_CPU_MOE:-0}" -gt 0 ] 2>/dev/null; then
+                moe_args="--n-cpu-moe ${CHAT_N_CPU_MOE}"
+              fi
               override_args=""
               if [ -n "${CHAT_OVERRIDE_TENSOR:-}" ]; then
                 override_args="--override-tensor ${CHAT_OVERRIDE_TENSOR}"

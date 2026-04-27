@@ -79,6 +79,13 @@ data:
   # and the host RAM footprint of the experts (~15 GiB for 35B-A3B Q4_K_M).
   # `off` for dense models — they fit fully on GPU and don't need this.
   CHAT_CPU_MOE: "off"
+  # Partial-offload variant: pin the FIRST N expert FFN layers to CPU,
+  # leave the rest on GPU. Useful when you have just enough VRAM headroom
+  # to keep some experts on-device but not all — split the difference for
+  # a token-rate win over full --cpu-moe. 0 disables (== --cpu-moe off).
+  # Mutually exclusive with CHAT_CPU_MOE=on; if both are set, llama-server
+  # honors --cpu-moe (everything to CPU) and ignores --n-cpu-moe.
+  CHAT_N_CPU_MOE: "0"
   # Lower-level placement override. llama.cpp regex matches tensor names
   # and pins matches to the named device. Use this when --cpu-moe's blanket
   # "all experts to CPU" is too coarse — e.g. keep the first N expert
