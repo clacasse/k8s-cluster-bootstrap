@@ -85,7 +85,7 @@ spec:
                         {
                           "id": "${MODEL_ID}",
                           "name": "${MODEL_ID}",
-                          "reasoning": false,
+                          "reasoning": true,
                           "input": ["text"],
                           "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                           "contextWindow": 131072,
@@ -101,6 +101,7 @@ spec:
                       "primary": "openai/${MODEL_ID}"
                     },
                     "workspace": "/vault",
+                    "thinkingDefault": "low",
                     "compaction": {
                       "reserveTokensFloor": 8000
                     }
