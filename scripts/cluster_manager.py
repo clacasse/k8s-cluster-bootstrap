@@ -1213,7 +1213,11 @@ _LLAMA_CHAT_KEYS = (
     "CHAT_GPU_LAYERS",
     "CHAT_PARALLEL_SLOTS",
     "CHAT_KV_TYPE",
+    "CHAT_KV_UNIFIED",
     "CHAT_FLASH_ATTN",
+    "CHAT_REASONING_BUDGET",
+    "CHAT_REPEAT_PENALTY",
+    "CHAT_REPEAT_LAST_N",
     "CHAT_CPU_MOE",
     "CHAT_N_CPU_MOE",
     "CHAT_OVERRIDE_TENSOR",
@@ -1233,7 +1237,11 @@ _LLAMA_CHAT_PROMPTS = {
     "CHAT_GPU_LAYERS":     "GPU layer offload (999 = all, lower = partial CPU offload)",
     "CHAT_PARALLEL_SLOTS": "Parallel request slots",
     "CHAT_KV_TYPE":        "KV cache quantization (q8_0 / q4_0 / q5_0 / f16)",
+    "CHAT_KV_UNIFIED":     "Unified KV across slots (on / off)",
     "CHAT_FLASH_ATTN":     "Flash attention (on / off / auto)",
+    "CHAT_REASONING_BUDGET": "Thinking-block token budget (-1 unrestricted, 0 disabled, N capped)",
+    "CHAT_REPEAT_PENALTY": "Repeat-token sampling penalty (1.0–1.3 conservative)",
+    "CHAT_REPEAT_LAST_N":  "Repeat-penalty lookback window (tokens)",
     "CHAT_CPU_MOE":        "Offload MoE expert tensors to CPU/RAM (on / off)",
     "CHAT_N_CPU_MOE":      "Partial MoE offload: first N expert layers to CPU (0 = off)",
     "CHAT_OVERRIDE_TENSOR": "Tensor placement regex (empty = none, advanced)",
@@ -1265,13 +1273,27 @@ def _validate_chat_field(key: str, value: str) -> None:
         raise typer.BadParameter(
             f"CHAT_CPU_MOE must be one of {list(_VALID_CPU_MOE)}, got {value!r}"
         )
-    if key in ("CHAT_CTX_SIZE", "CHAT_GPU_LAYERS", "CHAT_PARALLEL_SLOTS", "CHAT_N_CPU_MOE"):
+    if key == "CHAT_KV_UNIFIED" and value not in _VALID_CPU_MOE:
+        raise typer.BadParameter(
+            f"CHAT_KV_UNIFIED must be one of {list(_VALID_CPU_MOE)}, got {value!r}"
+        )
+    if key in ("CHAT_CTX_SIZE", "CHAT_GPU_LAYERS", "CHAT_PARALLEL_SLOTS", "CHAT_N_CPU_MOE", "CHAT_REPEAT_LAST_N"):
         try:
             n = int(value)
         except ValueError as e:
             raise typer.BadParameter(f"{key} must be an integer, got {value!r}") from e
         if n < 0:
             raise typer.BadParameter(f"{key} must be non-negative, got {n}")
+    if key == "CHAT_REASONING_BUDGET":
+        try:
+            int(value)
+        except ValueError as e:
+            raise typer.BadParameter(f"CHAT_REASONING_BUDGET must be an integer, got {value!r}") from e
+    if key == "CHAT_REPEAT_PENALTY":
+        try:
+            float(value)
+        except ValueError as e:
+            raise typer.BadParameter(f"CHAT_REPEAT_PENALTY must be a float, got {value!r}") from e
 
 
 llama_app = typer.Typer(
@@ -1487,7 +1509,11 @@ _LLAMA_SETUP_DEFAULTS = {
     "CHAT_GPU_LAYERS":     "999",
     "CHAT_PARALLEL_SLOTS": "1",
     "CHAT_KV_TYPE":        "q8_0",
+    "CHAT_KV_UNIFIED":     "off",
     "CHAT_FLASH_ATTN":     "on",
+    "CHAT_REASONING_BUDGET": "0",
+    "CHAT_REPEAT_PENALTY": "1.15",
+    "CHAT_REPEAT_LAST_N":  "64",
     "CHAT_CPU_MOE":        "off",
     "CHAT_N_CPU_MOE":      "0",
     "CHAT_OVERRIDE_TENSOR": "",
