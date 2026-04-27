@@ -108,13 +108,12 @@ spec:
                 },
                 "plugins": {
                   "entries": {
-                    "deepgram":              {"enabled": false},
-                    "elevenlabs":            {"enabled": false},
-                    "microsoft":             {"enabled": false},
-                    "image-generation-core": {"enabled": false},
-                    "video-generation-core": {"enabled": false},
-                    "speech-core":           {"enabled": false},
-                    "voice-call":            {"enabled": false}
+                    "deepgram":      {"enabled": false},
+                    "elevenlabs":    {"enabled": false},
+                    "microsoft":     {"enabled": false},
+                    "voice-call":    {"enabled": false},
+                    "talk-voice":    {"enabled": false},
+                    "phone-control": {"enabled": false}
                   }
                 },
                 "mcp": {
