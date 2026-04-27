@@ -91,6 +91,8 @@ spec:
                 -ctk "${CHAT_KV_TYPE}" -ctv "${CHAT_KV_TYPE}" \
                 --flash-attn "${CHAT_FLASH_ATTN}" \
                 --reasoning-budget "${CHAT_REASONING_BUDGET}" \
+                --repeat-penalty "${CHAT_REPEAT_PENALTY}" \
+                --repeat-last-n "${CHAT_REPEAT_LAST_N}" \
                 --metrics --jinja \
                 ${CHAT_EXTRA_FLAGS}
           envFrom:

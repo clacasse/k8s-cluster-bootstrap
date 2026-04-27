@@ -50,6 +50,25 @@ data:
   # forces multi-thousand-token reprocess every agent loop iteration. Set to
   # -1 if you want full CoT and don't mind the cache hit.
   CHAT_REASONING_BUDGET: "0"
+
+  # --- Sampling: repetition control ---
+  # Defaults below tame degenerate-loop generation — Qwen3.6-A3B observed
+  # to fall into "NO_REPLY" / single-token loops on short-reply tasks
+  # (e.g. heartbeat checks where the natural answer is "HEARTBEAT_OK").
+  # Once the loop forms, sampling stays in it until max_tokens. The
+  # 16 KB of repeated tokens then gets persisted into conversation
+  # history forever, dragging through every cache eval afterwards.
+  #
+  # Repeat penalty in [1.0, 1.3] is the conservative band — values
+  # >1.3 start to break legitimate repeated phrases (proper nouns,
+  # boilerplate). 1.15 lands in the "loops break, prose stays
+  # natural" zone for Qwen3-class models.
+  CHAT_REPEAT_PENALTY: "1.15"
+  # Window for the penalty: how many recent tokens get checked for
+  # repeats. 64 is standard; bump higher for longer-range repetition,
+  # but the cost rises with the window.
+  CHAT_REPEAT_LAST_N: "64"
+
   CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
 
   # --- Embedding model ---
