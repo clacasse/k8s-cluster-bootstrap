@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-image-updater
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  # Image Updater watches a registry for new digests/tags and writes
+  # the new image reference back into the relevant Application's
+  # Helm parameters (write-back-method=argocd → patches the Application
+  # via the k8s API, so no git deploy key needed). With pullPolicy=Always
+  # already set on the chart, Argo's self-heal cycle then rolls the
+  # deployment to the new digest. End-to-end: push to main → CI builds
+  # ghcr.io/.../<image>:main → image-updater detects the new digest within
+  # the configured interval (default 2 min) → Argo deploys.
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argocd-image-updater
+    targetRevision: 0.13.3
+    helm:
+      releaseName: argocd-image-updater
+      values: |
+        config:
+          # Read Argo Applications via the k8s API directly (no Argo CD
+          # token to manage). The chart provisions the necessary RBAC
+          # for the SA to list/patch Applications in this namespace.
+          applicationsAPIKind: kubernetes
+          # Single GHCR entry. `pullsecret:` references a
+          # dockerconfigjson Secret in this same namespace —
+          # provision it once via cluster_manager.py
+          # add-image-pull-secret --namespace argocd --username <user>.
+          registries:
+            - name: GitHub Container Registry
+              api_url: https://ghcr.io
+              prefix: ghcr.io
+              ping: yes
+              credentials: pullsecret:argocd/ghcr-pull
+              defaultns: library
+        # Polling cadence: every 2 min is plenty for dev velocity
+        # without hammering the registry. Bump down for tighter loops.
+        extraArgs:
+          - --interval=2m
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
