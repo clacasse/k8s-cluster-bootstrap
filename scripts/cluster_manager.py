@@ -1855,6 +1855,20 @@ def llama_set_n_cpu_moe(
     _llama_set_single(control, "CHAT_N_CPU_MOE", str(n))
 
 
+@llama_app.command("set-kv-unified")
+def llama_set_kv_unified(
+    mode: str = typer.Argument(..., help=f"One of {list(_VALID_CPU_MOE)}."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Toggle --kv-unified — share one KV buffer pool across slots.
+    Required for --cache-idle-slots to retain idle slot prefixes.
+    `on` for multi-slot setups where idle eviction shows up in TTFT.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_KV_UNIFIED", mode)
+
+
 @llama_app.command("set-override-tensor")
 def llama_set_override_tensor(
     regex: str = typer.Argument(..., help="Tensor placement regex; empty string clears."),

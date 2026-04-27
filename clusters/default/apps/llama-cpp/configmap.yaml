@@ -96,6 +96,18 @@ data:
   # — passed unquoted into the exec line.
   CHAT_OVERRIDE_TENSOR: ""
 
+  # Unified KV cache across slots. With --kv-unified the per-slot KV
+  # buffers share one allocation pool, which is what unlocks llama-server's
+  # --cache-idle-slots behavior (idle slot KV cache is retained across
+  # slot reassignments instead of being reclaimed). On a 2-slot setup
+  # where the watcher and interactive agent each own a slot, this keeps
+  # the idle slot warm across switches — matters when the gap between a
+  # slot's turns is long enough that its prefix would otherwise drop.
+  # Default off because it's a behavioral change worth opting into per
+  # deployment; enable on multi-slot setups where idle-slot eviction is
+  # measurable in TTFT.
+  CHAT_KV_UNIFIED: "off"
+
   CHAT_EXTRA_FLAGS: ""             # escape hatch for flags not yet promoted to named fields
 
   # --- Embedding model ---

@@ -93,6 +93,10 @@ spec:
               if [ -n "${CHAT_OVERRIDE_TENSOR:-}" ]; then
                 override_args="--override-tensor ${CHAT_OVERRIDE_TENSOR}"
               fi
+              kv_unified_args=""
+              case "${CHAT_KV_UNIFIED:-off}" in
+                on|true|1) kv_unified_args="--kv-unified" ;;
+              esac
               # Flags composed from named ConfigMap fields so each is
               # discoverable + individually tunable via `llama set-*`.
               # CHAT_EXTRA_FLAGS is the escape hatch for anything not
@@ -113,6 +117,7 @@ spec:
                 --repeat-last-n "${CHAT_REPEAT_LAST_N}" \
                 ${moe_args} \
                 ${override_args} \
+                ${kv_unified_args} \
                 --metrics --jinja \
                 ${CHAT_EXTRA_FLAGS}
           envFrom:

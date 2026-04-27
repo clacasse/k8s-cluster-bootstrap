@@ -275,6 +275,7 @@ Every per-deployment knob is a first-class field with validation, exposed via de
 | `CHAT_CPU_MOE` | `--cpu-moe V` / `set-cpu-moe V` | off | `on` adds `--cpu-moe`: MoE expert FFN tensors stay in host RAM, only attention/router on GPU. Required to fit a 35B-class MoE on a 16 GB card. `off` for dense models. |
 | `CHAT_N_CPU_MOE` | `--n-cpu-moe N` / `set-n-cpu-moe N` | 0 | Partial MoE offload: first N expert layers to CPU, the rest stay on GPU. Use when full `--cpu-moe` leaves VRAM headroom unused. 0 = off. Ignored if `CHAT_CPU_MOE=on`. |
 | `CHAT_OVERRIDE_TENSOR` | `--override-tensor REGEX` / `set-override-tensor "<re>"` | "" | Tensor placement regex (advanced). Use when neither `--cpu-moe` nor `--n-cpu-moe` express the layout you want. |
+| `CHAT_KV_UNIFIED` | `set-kv-unified V` | off | `on` adds `--kv-unified`: shared KV buffer pool across slots. Required to keep idle slot prefixes warm via `--cache-idle-slots`. Worth turning on for multi-slot setups where slot-switch evictions show up in TTFT. |
 | `CHAT_EXTRA_FLAGS` | `--flags STR` / `set-flags "<str>"` | "" | Escape hatch: `--rope-scaling`, etc. — anything not yet promoted to its own field. |
 
 ### Tuning for your hardware
