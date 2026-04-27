@@ -154,6 +154,14 @@ spec:
               value: production
             - name: OPENCLAW_SKIP_SERVICE_CHECK
               value: "true"
+            # Per-stage ingress timing logs. Emits one log line per stage
+            # of the inbound message handler (session-store load, model
+            # catalog/selection, etc.) with elapsedMs. Cheap — fires once
+            # per user message — and worth keeping on while we still want
+            # to see where the time goes between channel receipt and
+            # prompt submission to the model.
+            - name: OPENCLAW_DEBUG_INGRESS_TIMING
+              value: "1"
             - name: OPENAI_API_KEY
               value: llama-local  # placeholder — llama.cpp has no real auth; this just enables the provider
             - name: OPENAI_BASE_URL
