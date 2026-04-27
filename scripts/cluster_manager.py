@@ -1810,6 +1810,22 @@ def llama_set_flash_attn(
     _llama_set_single(control, "CHAT_FLASH_ATTN", mode)
 
 
+@llama_app.command("set-reasoning-budget")
+def llama_set_reasoning_budget(
+    tokens: int = typer.Argument(..., help="Token budget for thinking blocks. -1 = unrestricted, 0 = no thinking."),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Change CHAT_REASONING_BUDGET — token budget for thinking models.
+    0 disables thinking entirely (best prompt cache, but agent loops can
+    bail out mid-thought when the model wants to self-correct). Positive
+    values give the model headroom to reason briefly before continuing.
+    -1 is unrestricted CoT.
+    """
+    if control is None:
+        control = _get_control_host()
+    _llama_set_single(control, "CHAT_REASONING_BUDGET", str(tokens))
+
+
 @llama_app.command("set-cpu-moe")
 def llama_set_cpu_moe(
     mode: str = typer.Argument(..., help=f"One of {list(_VALID_CPU_MOE)}."),
