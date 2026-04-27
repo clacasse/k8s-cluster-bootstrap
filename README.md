@@ -1,8 +1,10 @@
 # k8s Cluster Bootstrap
 
-Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. Create an instance repo from this template, edit an inventory, run a handful of commands: you end up with a k3s cluster managed by Argo CD, a full local LLM stack (llama.cpp chat + embed servers, OpenClaw agent, RAG pipeline, ChromaDB), and infra (CloudNativePG, Garage S3, Prometheus + Grafana) pre-wired and reachable on your LAN.
+Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. You fork this template, edit an inventory, run a handful of commands; you end up with a k3s cluster managed by Argo CD, a fully local LLM stack (llama.cpp chat + embed servers, the OpenClaw agent runtime, a RAG pipeline backed by ChromaDB), and the infra to support real apps (CloudNativePG, Garage S3, Prometheus + Grafana) — all reachable on your LAN.
 
 > **LAN-only by design.** In-cluster services (LLM inference, Ingress endpoints) don't carry their own authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
+
+See [docs/architecture.md](./docs/architecture.md) for a Mermaid diagram of the cluster + a generic application reference architecture showing how apps expose themselves to the agent through MCP.
 
 ## What you get
 
@@ -12,10 +14,11 @@ Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes �
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
 
 **Local LLM stack** (all runs on your hardware, no API calls out)
-- **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot.
-- **OpenClaw** agent at `https://openclaw.apps` with built-in MCP support, Slack + Telegram channels, Obsidian-vault workspace
-- **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes
-- All model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template has no opinion)
+- **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot. Built-in support for MoE expert offloading (`--cpu-moe` / `--n-cpu-moe`) so 30B-class MoEs run on a 16 GB-class GPU.
+- **llm-proxy** in front of the chat server — logs every request as JSONL, exports per-call latency metrics, lets you replay traffic without enabling llama.cpp's own slow-path logger.
+- **OpenClaw** agent runtime at `https://openclaw.apps`. Speaks MCP outward to anything you wire up; Slack + Telegram channels for chat; Obsidian vault as the workspace.
+- **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes.
+- Model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template ships no opinion about which model your cluster runs).
 
 **Infrastructure**
 - **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases installed by default
@@ -50,28 +53,14 @@ To pull upstream improvements into your instance later:
 
 ## Topology
 
-```
-┌─────────────────────────┐  ┌─────────────────────────┐  ┌──────────────────────────┐
-│  control node           │  │  worker node            │  │  gpu node                │
-│  (k3s server)           │  │  (k3s agent)            │  │  (k3s agent)             │
-│  stable, always-on      │  │  stable, always-on      │  │  NVIDIA GPU; may reboot  │
-│                         │  │                         │  │  labels: nvidia.com/gpu  │
-│                         │  │                         │  │  taints: nvidia.com/gpu  │
-└────────────┬────────────┘  └────────────┬────────────┘  └────────────┬─────────────┘
-             │                            │                            │
-             └────────────────────────────┴────────────────────────────┘
-                                    LAN (router DNS)
+Four roles, one VLAN, wildcard DNS funnels every app hostname through Traefik on the control node. See [docs/architecture.md](./docs/architecture.md) for a rendered diagram covering the cluster + the generic application reference architecture.
 
-                   *.apps  →  control node IP  (wildcard A record)
-                   GPU-pinned: llama-chat, dcgm-exporter, nfd-worker
-                   Storage-pinned: garage, CNPG cluster PVCs
-                   Everything else (control plane + light pods): control
-```
+- **control** node runs the k3s server, Traefik Ingress, Argo CD, and the agent runtime. Stable, always-on. `*.apps` resolves here via a single wildcard A record on your router.
+- **gpu** node is single-purpose: NVIDIA GPU + 32 GB-ish host RAM, runs `llama-chat` and `llama-embed`. Tainted with `nvidia.com/gpu=true:NoSchedule` so random workloads don't steal it.
+- **storage** node holds all the stateful services — Postgres clusters, the Garage object store, ChromaDB. Tainted with `role=storage:NoSchedule` and PVCs pin there via `local-path`.
+- **worker** nodes are optional general compute; scale however you like.
 
-- **One server, no HA.** If it dies, rebuild from git.
-- **GPU node is tainted** with `nvidia.com/gpu=true:NoSchedule` so random workloads don't steal its resources. Only pods that explicitly tolerate the taint and pin to it (the chat LLM, GPU monitoring) land there.
-- **Storage node is tainted** with `role=storage:NoSchedule` for the same reason — Garage and any DB volume PVCs pin there.
-- **Minimum useful cluster** is 1 control + 1 GPU; the storage node is optional (its pods fall back to the control node when absent). Scale workers however you like.
+**One server, no HA.** If it dies, rebuild from git. **Minimum useful cluster** is 1 control + 1 GPU; the storage node is optional (its pods fall back to the control node when absent).
 
 ## Requirements
 
@@ -195,8 +184,8 @@ Generates secrets and runtime config that aren't stored in git. Run once after b
 - No-op when the configured repoURL is HTTPS — public repos don't need this
 
 `llama setup` creates:
-- `llama-cpp/llama-cpp-model` ConfigMap (CHAT_MODEL_REPO/FILE/alias/ctx/flags)
-- `openclaw/openclaw-model` ConfigMap (active-model, kept in sync with the alias)
+- `llama-cpp/llama-cpp-model` ConfigMap — every per-deployment chat knob: model repo / file / served-as alias / ctx size / GPU layer offload / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Each one is also individually settable later via `llama set-<knob>`.
+- `openclaw/openclaw-model` ConfigMap — `active-model` key, kept in sync with the chat-model alias so OpenClaw and `/v1/models` agree.
 
 Both ConfigMaps are **imperatively managed** — not reconciled from git — so
 edits via `llama setup` or `llama set-chat` persist without needing a commit.
@@ -228,7 +217,7 @@ Change it immediately after first login.
 
 ## Local LLM stack architecture
 
-Two `llama-server` pods backing the agent + RAG pipeline:
+Two `llama-server` pods backing the agent + RAG pipeline, fronted by a small request-logging proxy:
 
 ```
 namespace: llama-cpp
@@ -239,6 +228,11 @@ namespace: llama-cpp
 │  /v1/chat/completions, /v1/... │    │  /v1/embeddings, /metrics      │
 └──────────────┬─────────────────┘    └──────────────┬─────────────────┘
                │                                     │
+               ▼                                     │
+       ┌───────────────┐                             │
+       │   llm-proxy   │   JSONL request log +       │
+       │  (logs/metrics)│  per-call latency metrics  │
+       └───────┬───────┘                             │
                │  OpenAI-compatible HTTP             │
                │                                     │
        ┌───────┴───────┐                     ┌───────┴────────┐
@@ -248,6 +242,8 @@ namespace: llama-cpp
                                        └─────┤                │
                                              └────────────────┘
 ```
+
+The proxy isn't load-balancing — it's sitting in the request path so every chat completion gets logged to a JSONL file (analyzable with `dev/analyze-prompts.py`) and exported as Prometheus metrics. Embeds bypass it; they're cheap and high-volume so the log noise outweighs the value.
 
 ### Two ConfigMaps for chat-model config
 
@@ -307,8 +303,9 @@ The CLI knobs (`set-ctx`, `set-ngl`, `set-parallel`, etc.) survive Argo syncs be
 
 # First-time setup OR full reconfigure — prompts for repo, file, alias,
 # ctx size, GPU layer offload, parallel slots, KV cache type, flash
-# attention, and extra flags. Skips prompts for keys already set
-# unless --force.
+# attention, MoE offloading (cpu-moe + n-cpu-moe), tensor-placement
+# regex, and extra flags. Skips prompts for keys already set unless
+# --force.
 ./scripts/cluster_manager.py llama setup
 
 # Swap the chat model and optionally retune knobs in one shot.
@@ -324,6 +321,9 @@ The CLI knobs (`set-ctx`, `set-ngl`, `set-parallel`, etc.) survive Argo syncs be
 ./scripts/cluster_manager.py llama set-parallel 2
 ./scripts/cluster_manager.py llama set-kv-type q4_0
 ./scripts/cluster_manager.py llama set-flash-attn on
+./scripts/cluster_manager.py llama set-cpu-moe on            # all expert FFN tensors to host RAM
+./scripts/cluster_manager.py llama set-n-cpu-moe 28          # OR partial: first 28 layers to CPU
+./scripts/cluster_manager.py llama set-override-tensor ""    # advanced: clear or set a regex
 ./scripts/cluster_manager.py llama set-flags "--rope-scaling yarn --rope-freq-scale 2.0"
 
 # Swap the embed model (rare — changing dimensions means re-indexing
@@ -507,7 +507,7 @@ Pure git workflow — no Ansible, no DNS:
 | `setup-secrets` | Generate wildcard TLS cert, OpenClaw gateway token, Grafana admin password. Idempotent. |
 | `bootstrap-infra-secrets` | Generate Garage's auth tokens, create the `garage-auth` Secret, apply the single-node Garage layout. |
 | `setup-instance-repo` | Apply the Argo Repository Secret + patch live root Application when the instance repo is private (SSH). No-op for HTTPS repos. |
-| `llama setup` | Interactive prompt for chat-model repo / file / alias / context size / GPU layers / parallel slots / KV cache type / flash-attn / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `openclaw/openclaw-model` in sync. |
+| `llama setup` | Interactive prompt for every chat-model knob — repo / file / served-as alias / ctx / GPU layers / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `openclaw/openclaw-model` in sync. |
 
 ### Day-to-day
 
@@ -516,8 +516,8 @@ Pure git workflow — no Ansible, no DNS:
 | `status` | `kubectl get nodes,pods -A` via SSH to the control node. |
 | `restart [--wipe-rag]` | Restart the full app stack in the right order. `--wipe-rag` deletes ChromaDB data and re-indexes. |
 | `llama list` | Show active chat + embed models, every tunable knob (with `set` vs `default` markers), and what's cached on the PVCs. |
-| `llama set-chat <repo> <file> [--ctx N --ngl N --kv-type T --parallel N --flash-attn V --served-as NAME --flags STR]` | Swap chat model and optionally retune knobs in one shot. Warns + prompts when the model changes without `--served-as` (use `--keep-alias` to suppress). |
-| `llama set-ctx N` / `set-ngl N` / `set-parallel N` / `set-kv-type TYPE` / `set-flash-attn on│off│auto` / `set-flags "<str>"` | Targeted single-knob tweaks. Each restarts `llama-chat`. |
+| `llama set-chat <repo> <file> [--ctx N --ngl N --parallel N --kv-type T --flash-attn V --cpu-moe V --n-cpu-moe N --override-tensor RE --served-as NAME --flags STR]` | Swap chat model and optionally retune any knob in one shot. Warns + prompts when the model changes without `--served-as` (use `--keep-alias` to suppress). |
+| `llama set-ctx N` / `set-ngl N` / `set-parallel N` / `set-kv-type T` / `set-flash-attn on│off│auto` / `set-cpu-moe on│off` / `set-n-cpu-moe N` / `set-override-tensor "<re>"` / `set-flags "<str>"` | Targeted single-knob tweaks. Each restarts `llama-chat`. |
 | `llama set-embed <repo> <file>` | Swap embed model. Changing dimensions requires `restart --wipe-rag`. |
 | `llama logs <chat│embed> [-c <container>] [-f]` | Tail llama-chat / llama-embed pod logs. `-c pull-model` for the GGUF init container. |
 
