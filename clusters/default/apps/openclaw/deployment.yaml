@@ -108,9 +108,13 @@ spec:
                 },
                 "plugins": {
                   "entries": {
-                    "deepgram":   {"enabled": false},
-                    "elevenlabs": {"enabled": false},
-                    "microsoft":  {"enabled": false}
+                    "deepgram":              {"enabled": false},
+                    "elevenlabs":            {"enabled": false},
+                    "microsoft":             {"enabled": false},
+                    "image-generation-core": {"enabled": false},
+                    "video-generation-core": {"enabled": false},
+                    "speech-core":           {"enabled": false},
+                    "voice-call":            {"enabled": false}
                   }
                 },
                 "mcp": {
