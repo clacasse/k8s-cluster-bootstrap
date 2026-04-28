@@ -75,10 +75,17 @@ spec:
                   optional: true
             - name: SYNC_MODE
               value: bidirectional
+            # Match the hermes container's UID so files written by sync
+            # are owned by 10000:10000 — otherwise hermes (UID 10000)
+            # can read but not delete/move the synced notes. The
+            # belphemur image's s6-overlay entrypoint chowns the vault
+            # dir to PUID:PGID on startup, so changing this value
+            # triggers a one-time recursive chown of the existing PVC
+            # contents on next pod restart.
             - name: PUID
-              value: "1000"
+              value: "10000"
             - name: PGID
-              value: "1000"
+              value: "10000"
           resources:
             requests:
               cpu: 50m
