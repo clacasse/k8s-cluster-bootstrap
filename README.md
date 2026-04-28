@@ -1,6 +1,6 @@
 # k8s Cluster Bootstrap
 
-Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. You fork this template, edit an inventory, run a handful of commands; you end up with a k3s cluster managed by Argo CD, a fully local LLM stack (llama.cpp chat + embed servers, the OpenClaw agent runtime, a RAG pipeline backed by ChromaDB), and the infra to support real apps (CloudNativePG, Garage S3, Prometheus + Grafana) — all reachable on your LAN.
+Ephemeral, reproducible-from-git k3s cluster for a small fleet of Ubuntu boxes — optionally with NVIDIA GPU nodes for AI workloads. You fork this template, edit an inventory, run a handful of commands; you end up with a k3s cluster managed by Argo CD, a fully local LLM stack (llama.cpp chat + embed servers, the Hermes agent runtime, a RAG pipeline backed by ChromaDB), and the infra to support real apps (CloudNativePG, Garage S3, Prometheus + Grafana) — all reachable on your LAN.
 
 > **LAN-only by design.** In-cluster services (LLM inference, Ingress endpoints) don't carry their own authentication. Do NOT deploy this on a cloud VM, a box with a public IP, or any network you don't fully trust without adding your own auth layer.
 
@@ -16,8 +16,7 @@ See [docs/architecture.md](./docs/architecture.md) for a Mermaid diagram of the 
 **Local LLM stack** (all runs on your hardware, no API calls out)
 - **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot. Built-in support for MoE expert offloading (`--cpu-moe` / `--n-cpu-moe`) so 30B-class MoEs run on a 16 GB-class GPU.
 - **llm-proxy** in front of the chat server — logs every request as JSONL, exports per-call latency metrics, lets you replay traffic without enabling llama.cpp's own slow-path logger.
-- **OpenClaw** agent runtime at `https://openclaw.apps`. Speaks MCP outward to anything you wire up; Slack + Telegram channels for chat; Obsidian vault as the workspace.
-- **Hermes** agent runtime at `https://hermes.apps` (optional, opt-in). Sibling-class agent to OpenClaw — Slack/Telegram/Discord channels, MCP, Obsidian vault, persistent memory + skills. Deploys side-by-side for comparison; tagged image consumed directly from Docker Hub.
+- **Hermes** agent runtime at `https://hermes.apps`. Telegram + Discord + Slack channels for chat; MCP support for tool wiring; Obsidian vault as the workspace; persistent memory + skills. Image consumed directly from Docker Hub (`docker.io/nousresearch/hermes-agent`); model defaults overlaid via a bootstrap-config init container that reads from the `hermes-model` ConfigMap so `llama set-chat` propagates atomically.
 - **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes.
 - Model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template ships no opinion about which model your cluster runs).
 
@@ -171,7 +170,6 @@ Generates secrets and runtime config that aren't stored in git. Run once after b
 
 `setup-secrets` creates:
 - Wildcard TLS certificate for `*.APPS_DOMAIN` (self-signed, 10-year)
-- OpenClaw gateway token (save it — needed for the web UI)
 - Grafana admin password
 
 `bootstrap-infra-secrets` creates:
@@ -186,7 +184,7 @@ Generates secrets and runtime config that aren't stored in git. Run once after b
 
 `llama setup` creates:
 - `llama-cpp/llama-cpp-model` ConfigMap — every per-deployment chat knob: model repo / file / served-as alias / ctx size / GPU layer offload / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Each one is also individually settable later via `llama set-<knob>`.
-- `openclaw/openclaw-model` ConfigMap — `active-model` key, kept in sync with the chat-model alias so OpenClaw and `/v1/models` agree.
+- `hermes/hermes-model` ConfigMap — `active-model` key, kept in sync with the chat-model alias. Hermes's bootstrap-config init container reads it and overlays the value into `/opt/data/config.yaml` as `model.default` on every pod start.
 
 Both ConfigMaps are **imperatively managed** — not reconciled from git — so
 edits via `llama setup` or `llama set-chat` persist without needing a commit.
@@ -237,10 +235,11 @@ namespace: llama-cpp
                │  OpenAI-compatible HTTP             │
                │                                     │
        ┌───────┴───────┐                     ┌───────┴────────┐
-       │   OpenClaw    │                     │  rag-indexer   │
-       │  (openclaw)   │  ◄──MCP /sse──┐     │ + rag-mcp      │
-       └───────────────┘               │     │  (openclaw ns) │
-                                       └─────┤                │
+       │    Hermes     │                     │  rag-indexer   │
+       │   (hermes)    │  ◄──MCP /sse──┐     │ + rag-mcp      │
+       └───────────────┘               │     │  (openclaw ns, │
+                                       └─────┤   pending      │
+                                             │   rename)      │
                                              └────────────────┘
 ```
 
@@ -257,7 +256,7 @@ The chat server reads its env from two ConfigMaps merged in order:
 
 The pod's `envFrom` lists both with `llama-cpp-model` second, so anything set there wins. This is what lets the upstream template carry NO opinion about which chat model your fork runs while still booting cleanly out of the box (you'll see a clear "run llama setup" crashloop on a fresh cluster).
 
-`llama setup` writes both `llama-cpp-model` and `openclaw-model` (the alias OpenClaw advertises) atomically — they stay consistent. Subsequent quick swaps go through `llama set-chat`, targeted tweaks through `llama set-ctx` / `set-ngl` / etc. All of these survive Argo syncs because they touch the imperative ConfigMap, not the git-managed one.
+`llama setup` writes both `llama-cpp-model` and `hermes-model` (the alias Hermes uses) atomically — they stay consistent. Subsequent quick swaps go through `llama set-chat`, targeted tweaks through `llama set-ctx` / `set-ngl` / etc. All of these survive Argo syncs because they touch the imperative ConfigMap, not the git-managed one.
 
 ### Tunable knobs
 
@@ -396,40 +395,27 @@ Register as many as you want — one setup invocation per repo:
 
 Setup refuses if a project with the same derived (or explicit) name already points at a different URL, and lists current registrations so you can pick a different `--project-name` or unregister the conflicting one first.
 
-### Connect Slack (optional)
-
-```bash
-./scripts/cluster_manager.py setup-slack
-```
-
-Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from https://api.slack.com/apps. Stores them in the cluster Secret, restarts OpenClaw. Run again to rotate tokens; `remove-slack` to delete.
-
 ### Connect Telegram (optional)
 
 ```bash
-# Default target is OpenClaw
 ./scripts/cluster_manager.py setup-telegram
-
-# Or target Hermes (or any other registered agent)
-./scripts/cluster_manager.py setup-telegram --target hermes
 ```
 
-Prompts for your bot token from BotFather. Stores it in the agent's Secret and restarts the agent. `remove-telegram --target <name>` deletes it. Telegram only allows one polling client per bot — to migrate a token between agents, run `remove-telegram --target <old>` first, then `setup-telegram --target <new>`.
+Prompts for your bot token from BotFather. Stores it in `hermes-secrets` and restarts Hermes. `remove-telegram` deletes it. The `--target <agent>` flag exists for future multi-agent setups; with only Hermes registered today the default just works.
 
 ### Set up Obsidian Sync workspace (optional)
 
-Each agent has its own `obsidian-sync` sidecar pulling from upstream Obsidian Sync into a per-agent vault PVC. Both agents stay aligned because Obsidian Sync is the source-of-truth — edit notes on any device, both agents see them. (PVCs are namespace-scoped + ReadWriteOnce, so we can't share one PVC across agents; running two sync clients is the workaround.)
+Hermes runs an `obsidian-sync` sidecar in its own namespace pulling from upstream Obsidian Sync into the `hermes-vault` PVC. The agent reads/writes notes at `/vault`.
 
 ```bash
 # 1. Get your auth token (one-time, interactive — prompts for email/password/MFA)
 docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest
 
-# 2. Configure the cluster — pick the target agent
-./scripts/cluster_manager.py setup-obsidian                    # OpenClaw (default)
-./scripts/cluster_manager.py setup-obsidian --target hermes
+# 2. Configure the cluster
+./scripts/cluster_manager.py setup-obsidian
 ```
 
-The sync pod runs in the agent's namespace, keeping its vault PVC in lockstep with the upstream Obsidian Sync vault. The agent reads and writes to that PVC as its workspace.
+The sync pod keeps `hermes-vault` in lockstep with the upstream Obsidian Sync vault. Hermes reads from `/vault` as its workspace, alongside its own `/opt/data` for runtime state (sessions, memories, the FTS5 SQLite session store).
 
 ### Convert instance repo from public to private
 
@@ -511,10 +497,10 @@ Pure git workflow — no Ansible, no DNS:
 
 | Command | Purpose |
 |---|---|
-| `setup-secrets` | Generate wildcard TLS cert, OpenClaw gateway token, Grafana admin password. Idempotent. |
+| `setup-secrets` | Generate wildcard TLS cert + Grafana admin password. Idempotent. |
 | `bootstrap-infra-secrets` | Generate Garage's auth tokens, create the `garage-auth` Secret, apply the single-node Garage layout. |
 | `setup-instance-repo` | Apply the Argo Repository Secret + patch live root Application when the instance repo is private (SSH). No-op for HTTPS repos. |
-| `llama setup` | Interactive prompt for every chat-model knob — repo / file / served-as alias / ctx / GPU layers / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `openclaw/openclaw-model` in sync. |
+| `llama setup` | Interactive prompt for every chat-model knob — repo / file / served-as alias / ctx / GPU layers / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `hermes/hermes-model` in sync. |
 
 ### Day-to-day
 
@@ -536,12 +522,11 @@ Pure git workflow — no Ansible, no DNS:
 | `provision-s3-app <name>` | Create a Garage bucket + access key + Kubernetes Secret for one app. |
 | `add-image-pull-secret <namespace> <name>` | Provision an image-pull Secret for a private registry. |
 | `add-repo-secret <name>` | Register a git repository with Argo CD as a Repository Secret. |
-| `setup-slack` / `remove-slack` | Configure or remove Slack bot + app tokens for OpenClaw. |
-| `setup-telegram [--target <agent>]` / `remove-telegram [--target <agent>]` | Configure or remove the Telegram bot token for the chosen agent (`openclaw` default, or `hermes`). One bot per polling client — migrate a token by `remove`-ing from the old target first, then `setup`-ing on the new one. |
-| `setup-obsidian [--target <agent>]` | Configure Obsidian Sync for the chosen agent's workspace. Each agent owns its own vault PVC; both stay aligned via the shared upstream Obsidian Sync vault. |
-| `remove-obsidian [--target <agent>]` | Stop syncing for the chosen agent — removes the auth-token Secret key + deletes the obsidian-config ConfigMap, restarts the sync sidecar if present. Vault PVC contents preserved. |
-| `approve-pairing <channel> <code> [--target <agent>]` | Approve a user's pairing request (e.g. `telegram HPP2WU9B --target hermes`). Default target is `openclaw`. Both agents support the pairing flow — user messages the bot, gets a code, operator approves. |
-| `allow-user <id> [--target <agent>]` | Allowlist a numeric Telegram user ID (or comma-separated list) for an allowlist-style agent. Hermes only — OpenClaw uses pairing codes. Get your numeric ID from `@userinfobot` on Telegram. Each call REPLACES the existing list. |
+| `setup-telegram [--target <agent>]` / `remove-telegram [--target <agent>]` | Configure or remove the Telegram bot token for the agent's Secret. Default target is `hermes`. One bot per polling client — migrate a token by `remove`-ing from the old target first, then `setup`-ing on the new one. |
+| `setup-obsidian [--target <agent>]` | Configure Obsidian Sync for the agent's workspace. Default target is `hermes`. The agent's `obsidian-sync` sidecar pulls into its vault PVC, kept aligned via upstream Obsidian Sync. |
+| `remove-obsidian [--target <agent>]` | Stop syncing for the agent — removes the auth-token Secret key + deletes the obsidian-config ConfigMap, restarts the sync sidecar if present. Vault PVC contents preserved. |
+| `approve-pairing <channel> <code> [--target <agent>]` | Approve a user's pairing request (e.g. `telegram HPP2WU9B`). Default target is `hermes`. The agent replies to a new chat with a pairing code; the operator approves it here. |
+| `allow-user <id> [--target <agent>]` | Allowlist a numeric Telegram user ID (or comma-separated list). Get your numeric ID from `@userinfobot` on Telegram. Each call REPLACES the existing list. |
 
 ### Private apps repos
 
@@ -602,9 +587,11 @@ Pure git workflow — no Ansible, no DNS:
         │       ├── llama-cpp.yaml       # llama-chat + llama-embed pods
         │       ├── node-feature-discovery.yaml
         │       ├── nvidia-device-plugin.yaml
-        │       ├── obsidian-sync.yaml
-        │       ├── openclaw.yaml
-        │       ├── hermes.yaml          # optional sibling agent for comparison
+        │       ├── obsidian-sync.yaml   # legacy: just owns the openclaw-namespace
+        │       │                          # vault PVCs; rag-indexer still mounts them
+        │       │                          # until the RAG pipeline is repointed at
+        │       │                          # hermes-vault.
+        │       ├── hermes.yaml          # the agent runtime
         │       ├── prometheus-crds.yaml
         │       ├── rag-indexer.yaml
         │       ├── rag-mcp.yaml
@@ -615,12 +602,12 @@ Pure git workflow — no Ansible, no DNS:
             ├── garage/                  # configmap + service + statefulset
             ├── grafana-dashboards/      # ConfigMap-shipped dashboards (LLM, GPU, nodes)
             ├── llama-cpp/               # default ConfigMap + chat + embed deployments
-            ├── obsidian-sync/           # legacy: holds openclaw vault PVC
-            │                             # (sync moved per-agent to apps/<agent>/obsidian-sync.yaml)
-            ├── openclaw/                # the agent gateway
-            ├── hermes/                  # alternate agent runtime
+            ├── obsidian-sync/           # legacy PVC-only app: owns obsidian-vault
+            │                             # PVC that rag-indexer still mounts. Slated
+            │                             # for removal once RAG repoints at hermes-vault.
+            ├── hermes/                   # the agent runtime
             │                             #   - configmap.yaml: hermes-model active served-as
-            │                             #   - obsidian-sync.yaml: per-namespace vault sync
+            │                             #   - obsidian-sync.yaml: vault sync sidecar
             │                             #   - deployment.yaml: bootstrap-config init container
             │                             #     overlays config.yaml from configmap on every boot
             ├── rag-indexer/             # CronJob/Deployment that indexes the vault
@@ -638,7 +625,6 @@ Versions live in two places:
 |---|---|---|
 | k3s | `k3s_version` | `v1.35.3+k3s1` |
 | Argo CD | `argocd_version` | `v3.0.23` |
-| OpenClaw | `openclaw_image` | `ghcr.io/openclaw/openclaw:2026.4.25` |
 | NVIDIA device plugin Helm chart | `nvidia_device_plugin_chart_version` | `0.17.4` |
 | Node Feature Discovery Helm chart | `nfd_chart_version` | `0.18.3` |
 
@@ -653,6 +639,7 @@ Versions live in two places:
 | ChromaDB image | `apps/chromadb/deployment.yaml` | `1.5.8` |
 | Garage image | `apps/garage/statefulset.yaml` | `dxflrs/garage:v1.2.0` |
 | llama.cpp server (chat + embed) | `apps/llama-cpp/deployment-{chat,embed}.yaml` | `ghcr.io/ggml-org/llama.cpp:server-cuda-b8895` |
+| Hermes agent | `apps/hermes/deployment.yaml` | `docker.io/nousresearch/hermes-agent:v2026.4.23` |
 
 Chat-model GGUF + tunables are deliberately NOT pinned in git — see [Local LLM stack](#local-llm-stack-architecture) below.
 
@@ -691,4 +678,4 @@ Chat-model GGUF + tunables are deliberately NOT pinned in git — see [Local LLM
 - Public internet exposure
 - CA-signed TLS (self-signed is sufficient for LAN)
 - Backup of model weights (re-pull from HuggingFace if you need them after a node OS reinstall)
-- A frontier-class chat model in the box. The defaults work for ~14B-class GGUFs on a 16 GB GPU; bigger/better needs a bigger card or a hosted-API provider in OpenClaw.
+- A frontier-class chat model in the box. The defaults work for ~14B-class GGUFs on a 16 GB GPU; bigger/better needs a bigger card or a hosted-API provider configured in Hermes.

@@ -1,14 +1,20 @@
-# OpenClaw-side vault PVCs.
+# Legacy vault PVCs.
 #
 # The obsidian-sync Deployment that previously lived alongside these
 # PVCs has been removed — sync responsibility moved per-agent (see
-# clusters/default/apps/hermes/obsidian-sync.yaml). The PVCs stay here
-# because the openclaw Deployment still mounts obsidian-vault at /vault;
-# pruning them would crash openclaw and lose the last-synced vault
-# snapshot.
+# clusters/default/apps/hermes/obsidian-sync.yaml). The OpenClaw agent
+# itself has also been retired.
 #
-# When openclaw is fully retired, this directory + its Argo Application
-# can be deleted entirely.
+# These PVCs remain because the RAG pipeline (rag-indexer, still
+# running in this namespace) mounts obsidian-vault to read vault
+# contents during indexing. The snapshot here is frozen at the moment
+# OpenClaw-side sync stopped — rag-indexer is reading stale content
+# until it's migrated to read hermes-vault directly. Migration is a
+# follow-up task.
+#
+# When the RAG pipeline is repointed at hermes-vault (or moved into the
+# hermes namespace), this directory + its Argo Application can be
+# deleted entirely.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

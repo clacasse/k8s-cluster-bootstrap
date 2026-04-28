@@ -5,7 +5,7 @@ Single CLI wrapping the full lifecycle:
   init-fork       one-time: rewrite REPO_URL + APPS_DOMAIN placeholders
   prep-node       per-node: add to inventory, apt upgrade, hostname, NVIDIA if GPU
   bootstrap       whole-cluster: k3s + Argo CD
-  setup-secrets   one-time: create TLS cert, OpenClaw token, Grafana creds
+  setup-secrets   one-time: create TLS cert + Grafana creds
   llama           model management: setup / list / set-chat / set-embed
   status          runtime: cluster/node/pod summary
   sync-upstream   pull upstream changes into your instance repo
@@ -922,7 +922,7 @@ def setup_secrets(
 
     Generates:
     - Wildcard TLS certificate for *.APPS_DOMAIN (used by Traefik for HTTPS)
-    - OpenClaw gateway token
+    - Grafana admin password
 
     Run once after bootstrap. Safe to re-run (skips existing secrets).
     """
@@ -965,38 +965,6 @@ def setup_secrets(
         console.print(f"[green]Wildcard TLS cert created in kube-system/wildcard-apps-tls.[/green]")
         console.print(f"[yellow]This is a self-signed cert — your browser will show a warning on first visit.[/yellow]\n")
 
-    # --- OpenClaw gateway token ---
-    if _kubectl_exists(control, "openclaw", "secret", "openclaw-secrets"):
-        console.print("[dim]openclaw-secrets already exists, skipping.[/dim]")
-    else:
-        token = secrets_mod.token_urlsafe(32)
-        _ensure_namespace(control, "openclaw")
-        _kubectl(control, "-n", "openclaw", "create", "secret", "generic", "openclaw-secrets",
-                 f"--from-literal=gateway-token={token}")
-        console.print(f"\n[green]OpenClaw gateway token created.[/green]")
-        console.print(f"[bold]Save this token — you'll need it to log into the OpenClaw web UI:[/bold]")
-        console.print(f"\n  [cyan]{token}[/cyan]\n")
-
-    # Note: the OpenClaw active-model ConfigMap used to be created here.
-    # It's been moved to `cluster_manager.py llama setup` — that command
-    # now writes both the llama-cpp-model ConfigMap (chat server's
-    # env) AND openclaw-model (OpenClaw's reference to it), atomically,
-    # which is cleaner than having two commands write to the same place.
-    # `setup-secrets` is secrets-only now.
-
-    # --- OpenClaw config ConfigMap ---
-    if _kubectl_exists(control, "openclaw", "configmap", "openclaw-config"):
-        console.print("[dim]openclaw-config ConfigMap already exists, skipping.[/dim]")
-    else:
-        disable_device_auth = typer.confirm(
-            "Disable device auth for OpenClaw? (required for reverse proxy access)",
-            default=True,
-        )
-        auth_value = "true" if disable_device_auth else "false"
-        _kubectl(control, "-n", "openclaw", "create", "configmap", "openclaw-config",
-                 f"--from-literal=disable-device-auth={auth_value}")
-        console.print(f"[green]OpenClaw config created (disable-device-auth={auth_value}).[/green]")
-
     # --- Grafana admin secret ---
     if _kubectl_exists(control, "monitoring", "secret", "grafana-admin"):
         console.print("[dim]grafana-admin secret already exists, skipping.[/dim]")
@@ -1011,82 +979,12 @@ def setup_secrets(
         console.print(f"\n  [cyan]{grafana_password}[/cyan]\n")
 
 
-@app.command("setup-slack")
-def setup_slack(
-    control: str = typer.Option(
-        None, "--control", "-c",
-        help="Control node host. Auto-detected from inventory if not provided.",
-    ),
-) -> None:
-    """Configure Slack integration for OpenClaw.
-
-    Prompts for Slack Bot Token and App Token, stores them in the
-    openclaw-secrets Secret, and restarts the OpenClaw pod. Safe to
-    re-run — overwrites existing tokens.
-    """
-    if control is None:
-        control = _get_control_host()
-
-    console.print(f"[dim]via {control}[/dim]\n")
-    console.print("Get these from your Slack app at https://api.slack.com/apps\n")
-
-    bot_token = typer.prompt("Slack Bot Token (xoxb-...)")
-    app_token = typer.prompt("Slack App Token (xapp-...)")
-
-    if not bot_token.startswith("xoxb-"):
-        console.print("[yellow]Warning: Bot token usually starts with xoxb-[/yellow]")
-    if not app_token.startswith("xapp-"):
-        console.print("[yellow]Warning: App token usually starts with xapp-[/yellow]")
-
-    _patch_secret(control, "openclaw", "openclaw-secrets", {
-        "slack-bot-token": bot_token,
-        "slack-app-token": app_token,
-    })
-    _restart_deployment(control, "openclaw", "openclaw")
-    console.print(f"\n[green]Slack tokens configured. OpenClaw restarting.[/green]")
-    console.print(f"\nOnce someone messages the bot in Slack, approve them with:")
-    console.print(f"  ./scripts/cluster_manager.py approve-pairing slack <CODE>")
-
-
-@app.command("remove-slack")
-def remove_slack(
-    control: str = typer.Option(
-        None, "--control", "-c",
-        help="Control node host. Auto-detected from inventory if not provided.",
-    ),
-) -> None:
-    """Remove Slack integration from OpenClaw.
-
-    Deletes the Slack tokens from the cluster Secret and restarts OpenClaw.
-    """
-    if control is None:
-        control = _get_control_host()
-
-    if not typer.confirm("This will remove Slack integration and delete the API tokens. Continue?"):
-        raise typer.Exit(0)
-
-    console.print(f"[dim]via {control}[/dim]\n")
-
-    _patch_secret(control, "openclaw", "openclaw-secrets", {
-        "slack-bot-token": None,
-        "slack-app-token": None,
-    })
-    _restart_deployment(control, "openclaw", "openclaw")
-    console.print(f"[green]Slack tokens removed. OpenClaw restarting.[/green]")
-
-
-# Per-agent locations the channel/integration commands write to. Both
-# openclaw and hermes use the same shape — a Secret named <agent>-secrets
-# in a namespace named <agent>, plus a Deployment named <agent> for the
-# agent itself and `obsidian-sync` for the sync sidecar. Adding a third
-# agent later is one entry here.
+# Per-agent locations the channel/integration commands write to. Each
+# uses the same shape — a Secret named <agent>-secrets in a namespace
+# named <agent>, plus a Deployment named <agent> for the agent itself
+# and `obsidian-sync` for the sync sidecar. Adding another agent is one
+# entry here.
 _AGENT_TARGETS = {
-    "openclaw": {
-        "namespace": "openclaw",
-        "secret": "openclaw-secrets",
-        "agent_deployment": "openclaw",
-        "obsidian_deployment": "obsidian-sync",
-    },
     "hermes": {
         "namespace": "hermes",
         "secret": "hermes-secrets",
@@ -1107,7 +1005,7 @@ def _resolve_agent_target(target: str) -> dict:
 @app.command("setup-telegram")
 def setup_telegram(
     target: str = typer.Option(
-        "openclaw", "--target", "-t",
+        "hermes", "--target", "-t",
         help=f"Agent to configure. One of {list(_AGENT_TARGETS)}.",
     ),
     control: str = typer.Option(
@@ -1139,15 +1037,14 @@ def setup_telegram(
     console.print(f"\nGrant yourself access — two options:")
     console.print(f"  Pairing (interactive — message the bot first, it replies with a code):")
     console.print(f"    ./scripts/cluster_manager.py approve-pairing telegram <CODE> --target {target}")
-    if target != "openclaw":
-        console.print(f"  Direct allowlist (preferred for known users — message @userinfobot for your ID):")
-        console.print(f"    ./scripts/cluster_manager.py allow-user --target {target} <YOUR_TELEGRAM_USER_ID>")
+    console.print(f"  Direct allowlist (preferred for known users — message @userinfobot for your ID):")
+    console.print(f"    ./scripts/cluster_manager.py allow-user --target {target} <YOUR_TELEGRAM_USER_ID>")
 
 
 @app.command("remove-telegram")
 def remove_telegram(
     target: str = typer.Option(
-        "openclaw", "--target", "-t",
+        "hermes", "--target", "-t",
         help=f"Agent to remove Telegram from. One of {list(_AGENT_TARGETS)}.",
     ),
     control: str = typer.Option(
@@ -1179,7 +1076,7 @@ def remove_telegram(
 @app.command("setup-obsidian")
 def setup_obsidian(
     target: str = typer.Option(
-        "openclaw", "--target", "-t",
+        "hermes", "--target", "-t",
         help=f"Agent to configure. One of {list(_AGENT_TARGETS)}.",
     ),
     control: str = typer.Option(
@@ -1231,7 +1128,7 @@ def setup_obsidian(
 @app.command("remove-obsidian")
 def remove_obsidian(
     target: str = typer.Option(
-        "openclaw", "--target", "-t",
+        "hermes", "--target", "-t",
         help=f"Agent to remove Obsidian Sync from. One of {list(_AGENT_TARGETS)}.",
     ),
     control: str = typer.Option(
@@ -1265,9 +1162,9 @@ def remove_obsidian(
         f"sudo k3s kubectl -n {_q(cfg['namespace'])} delete configmap obsidian-config"
         f" --ignore-not-found",
     )
-    # Best-effort restart — the deployment may not exist (e.g. openclaw
-    # side after the obsidian-sync Deployment was pruned). Catch the
-    # failure and move on.
+    # Best-effort restart — the deployment may not exist (e.g. legacy
+    # namespaces where the obsidian-sync Deployment was pruned). Catch
+    # the failure and move on.
     if _kubectl_exists(control, cfg["namespace"], "deployment", cfg["obsidian_deployment"]):
         _restart_deployment(control, cfg["namespace"], cfg["obsidian_deployment"])
         console.print(f"[green]Obsidian Sync stopped for {target}. {cfg['obsidian_deployment']} restarting (will idle without auth).[/green]")
@@ -1280,7 +1177,7 @@ def approve_pairing(
     channel: str = typer.Argument(..., help="Channel type (e.g. slack, telegram, whatsapp)."),
     code: str = typer.Argument(..., help="Pairing code shown to the user."),
     target: str = typer.Option(
-        "openclaw", "--target", "-t",
+        "hermes", "--target", "-t",
         help=f"Agent target. One of {list(_AGENT_TARGETS)}.",
     ),
     control: str = typer.Option(
@@ -1292,7 +1189,6 @@ def approve_pairing(
 
     When a user first messages a configured channel, the agent replies
     with a pairing code that the operator runs through this command.
-    Both OpenClaw and Hermes support this flow.
 
     For unattended setup (e.g. CI bootstrap, restoring a known user),
     use `allow-user --target <agent>` instead — that allowlists a
@@ -1302,20 +1198,14 @@ def approve_pairing(
     if control is None:
         control = _get_control_host()
 
-    if target == "hermes":
-        # Hermes binary lives in the venv at /opt/hermes/.venv/bin/hermes.
-        # kubectl exec doesn't inherit the entrypoint's PATH, so call it
-        # by full path. The container name -c hermes pins the call to
-        # the gateway container (skipping the dashboard sidecar).
-        _ssh(control,
-            f"sudo k3s kubectl -n {_q(cfg['namespace'])} exec deploy/{_q(cfg['agent_deployment'])} -c hermes --"
-            f" /opt/hermes/.venv/bin/hermes pairing approve {_q(channel)} {_q(code)}"
-        )
-    else:
-        _ssh(control,
-            f"sudo k3s kubectl -n {_q(cfg['namespace'])} exec deploy/{_q(cfg['agent_deployment'])} --"
-            f" {_q(target)} pairing approve {_q(channel)} {_q(code)}"
-        )
+    # The hermes binary lives in the venv at /opt/hermes/.venv/bin/hermes.
+    # kubectl exec doesn't inherit the entrypoint's PATH, so call it by
+    # full path. The container name -c hermes pins the call to the
+    # gateway container (skipping the dashboard sidecar).
+    _ssh(control,
+        f"sudo k3s kubectl -n {_q(cfg['namespace'])} exec deploy/{_q(cfg['agent_deployment'])} -c hermes --"
+        f" /opt/hermes/.venv/bin/hermes pairing approve {_q(channel)} {_q(code)}"
+    )
 
 
 @app.command("allow-user")
@@ -1333,7 +1223,7 @@ def allow_user(
         help="Control node host. Auto-detected from inventory if not provided.",
     ),
 ) -> None:
-    """Allowlist Telegram user IDs for an allowlist-style agent (Hermes).
+    """Allowlist Telegram user IDs for an allowlist-style agent.
 
     Hermes denies all unauthorized DMs to the bot until the sender's
     numeric Telegram ID is in TELEGRAM_ALLOWED_USERS. This command writes
@@ -1344,14 +1234,7 @@ def allow_user(
     multiple IDs as a single comma-separated string. Each invocation
     REPLACES the existing list — pass all the IDs you want allowed at
     once.
-
-    Refused for OpenClaw — that runtime uses pairing codes, not
-    allowlists. Use `approve-pairing` instead.
     """
-    if target == "openclaw":
-        raise typer.BadParameter(
-            "OpenClaw uses pairing codes, not allowlists. Use `approve-pairing` instead."
-        )
     cfg = _resolve_agent_target(target)
     if control is None:
         control = _get_control_host()
@@ -1620,13 +1503,15 @@ def _llama_set(control: str, role: str, repo: str, filename: str, served_as: str
 
     if role == "chat":
         # Chat config lives in llama-cpp-model (imperative). Edits persist.
-        # Also keep OpenClaw's active-model ConfigMap in lockstep with the
-        # served-as alias — openclaw.json interpolates ${ACTIVE_MODEL}
-        # from it, and a mismatch 404s every inference call.
+        # Also keep Hermes's active-model ConfigMap in lockstep with the
+        # served-as alias — the bootstrap-config init container reads
+        # hermes-model.active-model and writes it into config.yaml as
+        # model.default. A stale value here means hermes calls a model
+        # that doesn't exist on llama-chat anymore.
         console.print(f"Patching [cyan]{LLAMA_MODEL_CONFIGMAP}[/cyan]: {updates}")
         _llama_patch_model_config(control, updates)
         if served_as:
-            _apply_openclaw_active_model(control, served_as)
+            _apply_hermes_active_model(control, served_as)
     else:
         # Embed config lives in llama-cpp-defaults (Argo-managed). Live
         # patch works for a quick experiment but Argo will revert it on
@@ -1655,20 +1540,23 @@ def _llama_set(control: str, role: str, repo: str, filename: str, served_as: str
     console.print(f"Restarting [cyan]{deploy}[/cyan]")
     _restart_deployment(control, LLAMA_NS, deploy)
     if role == "chat":
-        # OpenClaw reads active-model at init-container time; restart to
-        # pick up a name change on its side too.
-        _restart_deployment(control, "openclaw", "openclaw")
+        # Hermes reads active-model at init-container time (via the
+        # bootstrap-config init container that overlays config.yaml from
+        # the hermes-model ConfigMap); restart so the new alias takes
+        # effect.
+        _restart_deployment(control, "hermes", "hermes")
     console.print(
         f"[green]Done.[/green] Pod will download the GGUF (if not cached) and reload."
     )
 
 
-def _apply_openclaw_active_model(control: str, served_as: str) -> None:
-    """Write the openclaw-model ConfigMap so openclaw.json's
-    ${ACTIVE_MODEL} interpolation matches the chat server's --alias.
+def _apply_hermes_active_model(control: str, served_as: str) -> None:
+    """Write the hermes-model ConfigMap so hermes's bootstrap-config
+    init container overlays the new alias into /opt/data/config.yaml as
+    model.default on next pod start.
     """
     _ssh(control,
-        f"sudo k3s kubectl -n openclaw create configmap openclaw-model"
+        f"sudo k3s kubectl -n hermes create configmap hermes-model"
         f" --from-literal=active-model={_q(served_as)}"
         f" --dry-run=client -o yaml"
         f" | sudo k3s kubectl apply -f -",
@@ -1727,9 +1615,9 @@ def llama_setup(
       - llama-cpp/llama-cpp-model: CHAT_* env keys the llama-chat pod
         reads via envFrom. Model repo/file/alias plus every tunable
         (ctx, ngl, parallel, kv-type, flash-attn, extra flags).
-      - openclaw/openclaw-model: active-model key interpolated into
-        openclaw.json so OpenClaw picks the same id the chat server
-        advertises under /v1/models.
+      - hermes/hermes-model: active-model key the bootstrap-config
+        init container reads and writes into config.yaml as
+        model.default, so the agent calls the right alias on llama-chat.
 
     Prompts for every chat knob in order; Enter accepts the current
     value (or default if unset). Pass CLI flags for any subset to skip
@@ -1742,7 +1630,7 @@ def llama_setup(
 
     existing = _llama_read_config(control)
     existing_active = _kubectl(
-        control, "-n", "openclaw", "get", "configmap", "openclaw-model",
+        control, "-n", "hermes", "get", "configmap", "hermes-model",
         "--ignore-not-found", "-o", "jsonpath={.data.active-model}",
         capture=True, check=False,
     ).stdout.strip()
@@ -1787,15 +1675,15 @@ def llama_setup(
 
     if existing_active != values["CHAT_SERVED_MODEL"]:
         console.print(
-            f"Writing [cyan]openclaw/openclaw-model[/cyan]: "
+            f"Writing [cyan]hermes/hermes-model[/cyan]: "
             f"active-model={values['CHAT_SERVED_MODEL']}"
         )
-        _apply_openclaw_active_model(control, values["CHAT_SERVED_MODEL"])
+        _apply_hermes_active_model(control, values["CHAT_SERVED_MODEL"])
 
     if restart:
-        console.print("Restarting [cyan]llama-chat[/cyan] and [cyan]openclaw[/cyan]")
+        console.print("Restarting [cyan]llama-chat[/cyan] and [cyan]hermes[/cyan]")
         _restart_deployment(control, LLAMA_NS, "llama-chat")
-        _restart_deployment(control, "openclaw", "openclaw")
+        _restart_deployment(control, "hermes", "hermes")
 
     console.print("[green]Done.[/green]")
 
@@ -1838,7 +1726,7 @@ def llama_set_chat(
     filename: str = typer.Argument(..., help="GGUF filename inside the repo."),
     served_as: str = typer.Option(
         None, "--served-as",
-        help="Id exposed via /v1/models (OpenClaw picks models by this id). "
+        help="Id exposed via /v1/models (the agent picks models by this id). "
              "If omitted AND the model is changing, you'll be prompted.",
     ),
     ctx: str = typer.Option(None, "--ctx", help="Context size in tokens."),
@@ -1867,7 +1755,7 @@ def llama_set_chat(
     the current ConfigMap value. One write, one restart.
 
     If you change the model but don't pass --served-as, you'll get a
-    warning + prompt to update the alias — OpenClaw otherwise keeps
+    warning + prompt to update the alias — the agent otherwise keeps
     reporting the old model id even though the weights have changed.
     Pass --keep-alias to suppress that prompt for intentional
     within-family variant swaps.
@@ -1902,7 +1790,7 @@ def llama_set_chat(
             updates[key] = val
 
     # Model changed + alias not explicitly updated = likely mistake.
-    # OpenClaw keeps reporting the old id under /v1/models, and chat
+    # The agent keeps reporting the old id under /v1/models, and chat
     # requests silently route to the new weights — functional but
     # misleading. Warn + prompt for an updated alias.
     if served_as is None and not keep_alias:
@@ -1916,7 +1804,7 @@ def llama_set_chat(
                 f"[yellow]⚠ Model is changing but --served-as was not set.[/yellow]\n"
                 f"  Current alias: [cyan]{current_served}[/cyan]\n"
                 f"  New model:     [cyan]{filename}[/cyan]\n"
-                f"  Without an alias update, OpenClaw + /v1/models will keep "
+                f"  Without an alias update, the agent + /v1/models will keep "
                 f"reporting [cyan]{current_served}[/cyan] even though the "
                 f"weights have switched."
             )
@@ -1930,12 +1818,12 @@ def llama_set_chat(
         console.print(f"  {k}={v}")
     _llama_patch_model_config(control, updates)
     if "CHAT_SERVED_MODEL" in updates:
-        _apply_openclaw_active_model(control, updates["CHAT_SERVED_MODEL"])
+        _apply_hermes_active_model(control, updates["CHAT_SERVED_MODEL"])
 
     console.print("Restarting [cyan]llama-chat[/cyan]")
     _restart_deployment(control, LLAMA_NS, "llama-chat")
     if "CHAT_SERVED_MODEL" in updates:
-        _restart_deployment(control, "openclaw", "openclaw")
+        _restart_deployment(control, "hermes", "hermes")
     console.print(
         "[green]Done.[/green] Pod will download the GGUF (if not cached) and reload."
     )
@@ -2167,8 +2055,12 @@ def restart(
 ) -> None:
     """Restart the full application stack in the correct order.
 
-    Restarts: ChromaDB → RAG indexer → RAG MCP → OpenClaw.
+    Restarts: ChromaDB → RAG indexer → RAG MCP → Hermes.
     With --wipe-rag, also deletes ChromaDB data for a clean re-index.
+
+    NOTE: ChromaDB / RAG pipeline still live in the legacy `openclaw`
+    namespace pending a follow-up rename. Hermes runs in its own
+    `hermes` namespace.
     """
     if control is None:
         control = _get_control_host()
@@ -2184,20 +2076,21 @@ def restart(
         _kubectl(control, "-n", "openclaw", "wait", "--for=condition=Ready",
                  "pod", "-l", "app=chromadb", "--timeout=120s")
 
-    steps = [
+    rag_steps = [
         ("ChromaDB", "chromadb"),
         ("RAG Indexer", "rag-indexer"),
         ("RAG MCP Server", "rag-mcp"),
-        ("OpenClaw", "openclaw"),
     ]
-
-    for name, deployment in steps:
+    for name, deployment in rag_steps:
         console.print(f"Restarting {name}...")
         _restart_deployment(control, "openclaw", deployment)
 
+    console.print("Restarting Hermes...")
+    _restart_deployment(control, "hermes", "hermes")
+
     console.print("\nWaiting for pods to come up...")
-    _kubectl(control, "-n", "openclaw", "wait", "--for=condition=Ready",
-             "pod", "-l", "app=openclaw", "--timeout=180s")
+    _kubectl(control, "-n", "hermes", "wait", "--for=condition=Ready",
+             "pod", "-l", "app=hermes", "--timeout=180s")
     console.print("[green]Stack restarted.[/green]")
 
 

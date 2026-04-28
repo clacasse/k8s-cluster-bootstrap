@@ -23,7 +23,7 @@ flowchart TB
 
         subgraph aians["AI namespace"]
             direction LR
-            Agent["AI Agent Runtime<br/>(OpenClaw)"]
+            Agent["AI Agent Runtime<br/>(Hermes)"]
             Proxy["LLM Proxy<br/>logging + metrics"]
             Chat["llama-chat<br/>(chat model)"]
             Embed["llama-embed<br/>(embeddings)"]
@@ -87,7 +87,7 @@ generic pattern for letting the AI agent operate on the app: it speaks
 the Model Context Protocol on one side and the app's own API/DB on the
 other, so the agent gets typed, scoped tools instead of raw HTTP.
 
-**AI namespace.** The agent runtime (OpenClaw) is the single integration
+**AI namespace.** The agent runtime (Hermes) is the single integration
 point. For inference it talks OpenAI-style chat completions through an
 LLM proxy (which logs and meters every call) into a local llama.cpp
 chat server. For *capability*, it speaks MCP outward — to a RAG MCP for
