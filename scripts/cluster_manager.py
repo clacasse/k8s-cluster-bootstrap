@@ -1136,8 +1136,12 @@ def setup_telegram(
     })
     _restart_deployment(control, cfg["namespace"], cfg["agent_deployment"])
     console.print(f"\n[green]Telegram bot configured for {target}. {cfg['agent_deployment']} restarting.[/green]")
-    console.print(f"\nOnce someone messages the bot on Telegram, approve them with:")
-    console.print(f"  ./scripts/cluster_manager.py approve-pairing telegram <CODE>")
+    console.print(f"\nGrant yourself access — two options:")
+    console.print(f"  Pairing (interactive — message the bot first, it replies with a code):")
+    console.print(f"    ./scripts/cluster_manager.py approve-pairing telegram <CODE> --target {target}")
+    if target != "openclaw":
+        console.print(f"  Direct allowlist (preferred for known users — message @userinfobot for your ID):")
+        console.print(f"    ./scripts/cluster_manager.py allow-user --target {target} <YOUR_TELEGRAM_USER_ID>")
 
 
 @app.command("remove-telegram")
@@ -1228,18 +1232,90 @@ def setup_obsidian(
 def approve_pairing(
     channel: str = typer.Argument(..., help="Channel type (e.g. slack, telegram, whatsapp)."),
     code: str = typer.Argument(..., help="Pairing code shown to the user."),
+    target: str = typer.Option(
+        "openclaw", "--target", "-t",
+        help=f"Agent target. One of {list(_AGENT_TARGETS)}.",
+    ),
     control: str = typer.Option(
         None, "--control", "-c",
         help="Control node host. Auto-detected from inventory if not provided.",
     ),
 ) -> None:
-    """Approve a user's pairing request for an OpenClaw channel."""
+    """Approve a user's pairing request for an agent's channel.
+
+    When a user first messages a configured channel, the agent replies
+    with a pairing code that the operator runs through this command.
+    Both OpenClaw and Hermes support this flow.
+
+    For unattended setup (e.g. CI bootstrap, restoring a known user),
+    use `allow-user --target <agent>` instead — that allowlists a
+    numeric Telegram user ID directly.
+    """
+    cfg = _resolve_agent_target(target)
     if control is None:
         control = _get_control_host()
-    _ssh(control,
-        f"sudo k3s kubectl -n openclaw exec deploy/openclaw --"
-        f" openclaw pairing approve {_q(channel)} {_q(code)}"
-    )
+
+    if target == "hermes":
+        # Hermes binary lives in the venv at /opt/hermes/.venv/bin/hermes.
+        # kubectl exec doesn't inherit the entrypoint's PATH, so call it
+        # by full path. The container name -c hermes pins the call to
+        # the gateway container (skipping the dashboard sidecar).
+        _ssh(control,
+            f"sudo k3s kubectl -n {_q(cfg['namespace'])} exec deploy/{_q(cfg['agent_deployment'])} -c hermes --"
+            f" /opt/hermes/.venv/bin/hermes pairing approve {_q(channel)} {_q(code)}"
+        )
+    else:
+        _ssh(control,
+            f"sudo k3s kubectl -n {_q(cfg['namespace'])} exec deploy/{_q(cfg['agent_deployment'])} --"
+            f" {_q(target)} pairing approve {_q(channel)} {_q(code)}"
+        )
+
+
+@app.command("allow-user")
+def allow_user(
+    user_ids: str = typer.Argument(
+        ...,
+        help="Numeric Telegram user ID (or comma-separated for multiple). REPLACES the existing allowlist.",
+    ),
+    target: str = typer.Option(
+        "hermes", "--target", "-t",
+        help=f"Agent target. One of {list(_AGENT_TARGETS)}.",
+    ),
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Allowlist Telegram user IDs for an allowlist-style agent (Hermes).
+
+    Hermes denies all unauthorized DMs to the bot until the sender's
+    numeric Telegram ID is in TELEGRAM_ALLOWED_USERS. This command writes
+    that value into the agent's Secret (key: telegram-allowed-users) and
+    restarts the agent so the env var picks up the new value.
+
+    Find your numeric ID by messaging @userinfobot on Telegram. Pass
+    multiple IDs as a single comma-separated string. Each invocation
+    REPLACES the existing list — pass all the IDs you want allowed at
+    once.
+
+    Refused for OpenClaw — that runtime uses pairing codes, not
+    allowlists. Use `approve-pairing` instead.
+    """
+    if target == "openclaw":
+        raise typer.BadParameter(
+            "OpenClaw uses pairing codes, not allowlists. Use `approve-pairing` instead."
+        )
+    cfg = _resolve_agent_target(target)
+    if control is None:
+        control = _get_control_host()
+
+    console.print(f"[dim]via {control}[/dim]\n")
+    console.print(f"Setting telegram-allowed-users={user_ids} on {cfg['secret']}")
+    _patch_secret(control, cfg["namespace"], cfg["secret"], {
+        "telegram-allowed-users": user_ids,
+    })
+    _restart_deployment(control, cfg["namespace"], cfg["agent_deployment"])
+    console.print(f"[green]Allowlist updated for {target}. {cfg['agent_deployment']} restarting.[/green]")
 
 
 LLAMA_NS = "llama-cpp"

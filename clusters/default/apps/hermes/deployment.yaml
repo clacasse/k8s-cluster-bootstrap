@@ -120,6 +120,20 @@ spec:
                   name: hermes-secrets
                   key: telegram-bot-token
                   optional: true
+            # Telegram allowlist — comma-separated numeric user IDs that
+            # are permitted to DM the bot. Hermes denies all messages by
+            # default; without this, the bot polls but won't reply.
+            # Co-located in hermes-secrets with the bot token (the user
+            # IDs aren't actually sensitive, just kept in the same
+            # Secret so a single `kubectl get secret hermes-secrets -o
+            # yaml` shows the full Telegram-related config).
+            # Populated by: cluster_manager.py allow-user --target hermes <ID>
+            - name: TELEGRAM_ALLOWED_USERS
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-secrets
+                  key: telegram-allowed-users
+                  optional: true
           # Hermes spins up Playwright + Chromium plus a FastAPI backend
           # plus the messaging gateway. 1 GiB baseline is generous; the
           # FTS5 session DB can grow but its working set stays small.
