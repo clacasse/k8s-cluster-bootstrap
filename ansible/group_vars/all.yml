@@ -1,7 +1,7 @@
 ---
 # Pinned versions. Bump deliberately.
 k3s_version: "v1.35.3+k3s1"
-argocd_version: "v3.0.23"
+argocd_version: "v3.3.8"
 nvidia_device_plugin_chart_version: "0.19.1"
 nfd_chart_version: "0.18.3"
 
