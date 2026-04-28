@@ -184,9 +184,19 @@ if __name__ == "__main__":
     log.info(f"Vault: {VAULT_PATH}")
 
     # Streamable-HTTP transport. FastMCP exposes the protocol on a single
-    # /mcp/ endpoint that handles both initialize/list-tools/call-tool
+    # /mcp endpoint that handles both initialize/list-tools/call-tool
     # requests AND server-pushed notifications, all over POST. Clients
-    # connect with `url: http://host:port/mcp/`.
+    # connect with `url: http://host:port/mcp` (NO trailing slash —
+    # Starlette redirects /mcp/ → /mcp with 307, dropping the POST body
+    # along the way).
     mcp.settings.host = "0.0.0.0"
     mcp.settings.port = 8080
+    # Disable DNS-rebinding protection. It's a browser-side attack vector
+    # (a malicious page on evil.com tricking the user's browser into
+    # POSTing to localhost) and doesn't apply to in-cluster server-to-
+    # server traffic. With it on, FastMCP's TrustedHostMiddleware rejects
+    # any Host header that isn't 127.0.0.1/localhost, including the
+    # cluster service DNS (rag-mcp.rag.svc.cluster.local:8080) that
+    # Hermes uses to reach us.
+    mcp.settings.transport_security.enable_dns_rebinding_protection = False
     mcp.run(transport="streamable-http")

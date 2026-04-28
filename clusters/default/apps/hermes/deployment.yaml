@@ -88,7 +88,9 @@ spec:
             - name: MODEL_BASE_URL
               value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
             - name: MCP_VAULT_SEARCH_URL
-              value: http://rag-mcp.rag.svc.cluster.local:8080/mcp/
+              # No trailing slash — FastMCP mounts at /mcp; /mcp/ would
+              # 307-redirect and drop the POST body in transit.
+              value: http://rag-mcp.rag.svc.cluster.local:8080/mcp
             # Hermes infers transport from the URL shape (single
             # /mcp/ endpoint = streamable-http). The transport key here
             # is informational only — Hermes doesn't actually have a
