@@ -14,10 +14,9 @@ spec:
       labels:
         app: hermes
     spec:
-      # Co-locate with openclaw on k3s-control. Three reasons: (a) keeps
-      # the perf comparison fair (same node, same storage class), (b) the
-      # obsidian-sync sidecar lives there if/when we add a hermes-side
-      # vault PVC, (c) leaves the GPU and storage nodes single-purpose.
+      # Pin to k3s-control so local-path PVCs (hermes-data, hermes-vault)
+      # land on the same node hermes runs on, and so the GPU + storage
+      # nodes stay single-purpose.
       #
       # Use nodeSelector, NOT nodeName: setting nodeName directly bypasses
       # the scheduler, and the local-path provisioner depends on the
@@ -96,8 +95,8 @@ spec:
       containers:
         - name: hermes
           # Upstream image — pinned to a tagged release rather than :latest
-          # so we control when we move forward. Bump deliberately, the same
-          # way we bump openclaw_image in ansible/group_vars/all.yml.
+          # so we control when we move forward. Bump deliberately when a
+          # new release lands.
           image: docker.io/nousresearch/hermes-agent:v2026.4.23
           # The image's default ENTRYPOINT is `hermes` (the interactive
           # TUI) which exits immediately under k8s. Override args to run
@@ -111,10 +110,8 @@ spec:
             # explicitly so the value is visible in the manifest.
             - name: HERMES_HOME
               value: /opt/data
-            # Local llama.cpp via the same llm-proxy openclaw uses. The
-            # proxy logs every request as JSONL, so we can compare hermes-
-            # vs-openclaw prompt shapes without enabling llama.cpp's own
-            # slow-path logger.
+            # Local llama.cpp via llm-proxy. The proxy logs every request
+            # as JSONL and exports per-call latency metrics.
             - name: HERMES_INFERENCE_PROVIDER
               value: custom
             - name: OPENAI_BASE_URL
@@ -126,10 +123,9 @@ spec:
             # model.default from /opt/data/config.yaml, which the
             # bootstrap-config init container above keeps in sync with
             # the hermes-model ConfigMap.
-            # Telegram bot token. Same key name as openclaw-secrets so the
-            # operator can copy the value cross-namespace with one kubectl
-            # command. Marked optional so the pod boots cleanly before
-            # the secret exists; Hermes silently skips Telegram in that case.
+            # Telegram bot token. Marked optional so the pod boots
+            # cleanly before the secret exists; Hermes silently skips
+            # Telegram in that case.
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

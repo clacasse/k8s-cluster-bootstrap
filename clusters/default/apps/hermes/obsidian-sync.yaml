@@ -1,12 +1,12 @@
-# Per-namespace Obsidian Sync sidecar for Hermes.
+# Hermes-side Obsidian Sync sidecar.
 #
-# Mirrors the openclaw obsidian-sync setup but writes to a hermes-vault
-# PVC in this namespace. Both agents end up with their own local copy of
-# the vault, kept aligned via Obsidian Sync upstream as the source of
-# truth. This is what unblocks running both agents side-by-side: PVCs
-# are namespace-scoped and ReadWriteOnce, so we can't share one across
-# namespaces; running two sync clients against the same upstream vault
-# is the cleanest workaround.
+# Pulls the upstream Obsidian Sync vault into hermes-vault PVC.
+# Hermes mounts the same PVC at /vault as its workspace.
+#
+# The rag pipeline runs its own independent obsidian-sync against the
+# same upstream vault (see apps/rag-obsidian-sync/) — PVCs are
+# namespace-scoped + ReadWriteOnce, so duplicating the sync per
+# consumer is how two namespaces share a vault.
 #
 # The Secret and ConfigMap referenced here are populated by:
 #   cluster_manager.py setup-obsidian --target hermes

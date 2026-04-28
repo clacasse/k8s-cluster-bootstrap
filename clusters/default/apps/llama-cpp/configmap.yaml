@@ -35,7 +35,7 @@ data:
   # --parallel DIVIDES the total context across slots (each slot gets
   # ctx/parallel tokens). 1 = the full 32k is available per request,
   # at the cost of not serving concurrent requests in parallel. This
-  # matches the agent workflow: OpenClaw issues sequential calls, each
+  # matches the agent workflow: the agent issues sequential calls, each
   # of which can legitimately use the full context for long compaction
   # prompts. Bump this only if you have genuinely concurrent clients
   # AND each request fits in the smaller per-slot ctx.

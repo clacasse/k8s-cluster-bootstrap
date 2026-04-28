@@ -2073,10 +2073,6 @@ def restart(
 
     Restarts: ChromaDB → RAG indexer → RAG MCP → Hermes.
     With --wipe-rag, also deletes ChromaDB data for a clean re-index.
-
-    NOTE: ChromaDB / RAG pipeline still live in the legacy `openclaw`
-    namespace pending a follow-up rename. Hermes runs in its own
-    `hermes` namespace.
     """
     if control is None:
         control = _get_control_host()
@@ -2085,11 +2081,11 @@ def restart(
 
     if wipe_rag:
         console.print("Wiping ChromaDB data...")
-        _kubectl(control, "-n", "openclaw", "scale", "deployment/chromadb", "--replicas=0")
-        _kubectl(control, "-n", "openclaw", "delete", "pvc", "chromadb-data", "--ignore-not-found")
-        _kubectl(control, "-n", "openclaw", "scale", "deployment/chromadb", "--replicas=1")
+        _kubectl(control, "-n", "rag", "scale", "deployment/chromadb", "--replicas=0")
+        _kubectl(control, "-n", "rag", "delete", "pvc", "chromadb-data", "--ignore-not-found")
+        _kubectl(control, "-n", "rag", "scale", "deployment/chromadb", "--replicas=1")
         console.print("Waiting for ChromaDB to recreate...")
-        _kubectl(control, "-n", "openclaw", "wait", "--for=condition=Ready",
+        _kubectl(control, "-n", "rag", "wait", "--for=condition=Ready",
                  "pod", "-l", "app=chromadb", "--timeout=120s")
 
     rag_steps = [
@@ -2099,7 +2095,7 @@ def restart(
     ]
     for name, deployment in rag_steps:
         console.print(f"Restarting {name}...")
-        _restart_deployment(control, "openclaw", deployment)
+        _restart_deployment(control, "rag", deployment)
 
     console.print("Restarting Hermes...")
     _restart_deployment(control, "hermes", "hermes")

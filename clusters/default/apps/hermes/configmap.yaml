@@ -3,13 +3,9 @@
 # which writes it into /opt/data/config.yaml under model.default.
 #
 # Kept as a separate ConfigMap (rather than inline in the deployment)
-# so a future change can have `cluster_manager.py llama set-chat`
-# update both `openclaw/openclaw-model` and `hermes/hermes-model` in
-# lockstep — same pattern as openclaw-model already uses today.
-#
-# Until that wiring lands, this value is the source of truth for Hermes
-# and bumps require either editing this file + Argo sync, or a manual
-# `kubectl patch cm hermes-model`.
+# so `cluster_manager.py llama set-chat` can update it directly without
+# editing the manifest. Bumps via the CLI persist across Argo syncs
+# (it's an imperative resource Argo doesn't reconcile).
 apiVersion: v1
 kind: ConfigMap
 metadata:
