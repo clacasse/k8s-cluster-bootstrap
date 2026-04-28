@@ -1,0 +1,15 @@
+# Hermes state — memories, skills, sessions, cron, logs, plans, plus an
+# embedded Honcho/FTS5 SQLite. Single PVC at /opt/data per Hermes
+# convention (HERMES_HOME). 10Gi gives plenty of room for the SQLite
+# session store to grow over time.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

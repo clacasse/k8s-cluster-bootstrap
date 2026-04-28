@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # RWO PVC — only one pod can mount at a time
+  selector:
+    matchLabels:
+      app: hermes
+  template:
+    metadata:
+      labels:
+        app: hermes
+    spec:
+      # Co-locate with openclaw on k3s-control. Three reasons: (a) keeps
+      # the perf comparison fair (same node, same storage class), (b) the
+      # obsidian-sync sidecar lives there if/when we add a hermes-side
+      # vault PVC, (c) leaves the GPU and storage nodes single-purpose.
+      nodeName: k3s-control
+      containers:
+        - name: hermes
+          # Upstream image — pinned to a tagged release rather than :latest
+          # so we control when we move forward. Bump deliberately, the same
+          # way we bump openclaw_image in ansible/group_vars/all.yml.
+          image: docker.io/nousresearch/hermes-agent:v2026.4.23
+          # The image's default ENTRYPOINT is `hermes` (the interactive
+          # TUI) which exits immediately under k8s. Override args to run
+          # the messaging gateway in the foreground — this is the path
+          # the upstream docs recommend for Docker / non-systemd hosts.
+          args:
+            - gateway
+            - run
+          env:
+            # Hermes config root. Default is /opt/data per the image; setting
+            # explicitly so the value is visible in the manifest.
+            - name: HERMES_HOME
+              value: /opt/data
+            # Local llama.cpp via the same llm-proxy openclaw uses. The
+            # proxy logs every request as JSONL, so we can compare hermes-
+            # vs-openclaw prompt shapes without enabling llama.cpp's own
+            # slow-path logger.
+            - name: HERMES_INFERENCE_PROVIDER
+              value: custom
+            - name: OPENAI_BASE_URL
+              value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
+            - name: OPENAI_API_KEY
+              value: hermes-local   # placeholder; llama.cpp ignores auth
+            # Process-level model override. The cli-config.yaml.example the
+            # entrypoint seeds the volume with otherwise targets OpenRouter
+            # and a Claude model, neither of which exist in this cluster.
+            # HERMES_MODEL forces the served-as id from llama-chat
+            # (CHAT_SERVED_MODEL).
+            - name: HERMES_MODEL
+              value: qwen3.6-35b-a3b
+            # Telegram bot token. Same key name as openclaw-secrets so the
+            # operator can copy the value cross-namespace with one kubectl
+            # command. Marked optional so the pod boots cleanly before
+            # the secret exists; Hermes silently skips Telegram in that case.
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-secrets
+                  key: telegram-bot-token
+                  optional: true
+          # Hermes spins up Playwright + Chromium plus a FastAPI backend
+          # plus the messaging gateway. 1 GiB baseline is generous; the
+          # FTS5 session DB can grow but its working set stays small.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
+            # NOTE: vault mount intentionally absent in v1. The
+            # obsidian-vault PVC is namespace-scoped to openclaw and can't
+            # be mounted into hermes directly. Two follow-on options
+            # documented in the README under "Hermes vault setup":
+            #   1. Run a separate obsidian-sync sidecar in this namespace
+            #      that syncs the same upstream Obsidian Sync vault to a
+            #      hermes-vault PVC.
+            #   2. After cutover from openclaw, migrate the vault PVC by
+            #      copying contents and binding here.
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hermes-data
