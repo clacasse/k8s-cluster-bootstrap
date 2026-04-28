@@ -18,7 +18,14 @@ spec:
       # the perf comparison fair (same node, same storage class), (b) the
       # obsidian-sync sidecar lives there if/when we add a hermes-side
       # vault PVC, (c) leaves the GPU and storage nodes single-purpose.
-      nodeName: k3s-control
+      #
+      # Use nodeSelector, NOT nodeName: setting nodeName directly bypasses
+      # the scheduler, and the local-path provisioner depends on the
+      # scheduler's volume.kubernetes.io/selected-node annotation to
+      # provision PVCs. Skipping the scheduler hangs the PVC in Pending
+      # forever.
+      nodeSelector:
+        kubernetes.io/hostname: k3s-control
       containers:
         - name: hermes
           # Upstream image — pinned to a tagged release rather than :latest
