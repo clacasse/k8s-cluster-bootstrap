@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: rag-indexer
+  name: rag-obsidian-sync
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -10,7 +10,7 @@ spec:
   source:
     repoURL: REPO_URL
     targetRevision: HEAD
-    path: clusters/default/apps/rag-indexer
+    path: clusters/default/apps/rag-obsidian-sync
   destination:
     server: https://kubernetes.default.svc
     namespace: rag

@@ -1,0 +1,106 @@
+# Per-namespace Obsidian Sync sidecar for the RAG pipeline.
+#
+# Pulls the upstream Obsidian Sync vault into rag-vault PVC. rag-indexer
+# and rag-mcp both mount this PVC at /vault to read note contents
+# (rag-indexer for embedding generation, rag-mcp for surfacing matched
+# excerpts in tool results).
+#
+# Distinct from the hermes-side sync — both clients run independently
+# against the same upstream Obsidian Sync vault. The duplication is
+# what lets the RAG pipeline be agent-independent: someone could remove
+# Hermes entirely and RAG keeps working.
+#
+# Secret + ConfigMap below are populated by:
+#   cluster_manager.py setup-obsidian --target rag
+# Both env refs are optional so the pod boots cleanly before that
+# command has been run; obsidian-sync logs an auth error and idles
+# until the secret arrives.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-obsidian-sync-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: obsidian-sync
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: obsidian-sync
+  template:
+    metadata:
+      labels:
+        app: obsidian-sync
+    spec:
+      # Pin to k3s-control so the local-path PVCs land alongside the
+      # rag pods that mount them.
+      nodeSelector:
+        kubernetes.io/hostname: k3s-control
+      containers:
+        - name: obsidian-sync
+          image: ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+          env:
+            - name: OBSIDIAN_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rag-secrets
+                  key: obsidian-auth-token
+                  optional: true
+            - name: VAULT_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: obsidian-config
+                  key: vault-name
+                  optional: true
+            - name: SYNC_MODE
+              value: bidirectional
+            # rag-indexer + rag-mcp don't write to /vault, so the UID/
+            # GID here only needs to match what those two containers
+            # run as (they read the vault). The default 1000:1000 from
+            # the linuxserver image is fine for read-only consumers.
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: vault
+              mountPath: /vault
+            - name: config
+              mountPath: /home/obsidian/.config
+      volumes:
+        - name: vault
+          persistentVolumeClaim:
+            claimName: rag-vault
+        - name: config
+          persistentVolumeClaim:
+            claimName: rag-obsidian-sync-config

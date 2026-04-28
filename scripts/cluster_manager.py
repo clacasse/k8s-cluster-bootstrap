@@ -979,11 +979,15 @@ def setup_secrets(
         console.print(f"\n  [cyan]{grafana_password}[/cyan]\n")
 
 
-# Per-agent locations the channel/integration commands write to. Each
-# uses the same shape — a Secret named <agent>-secrets in a namespace
-# named <agent>, plus a Deployment named <agent> for the agent itself
-# and `obsidian-sync` for the sync sidecar. Adding another agent is one
-# entry here.
+# Targets for the channel/integration commands. Each entry covers a
+# namespace + Secret + (optionally) an agent Deployment. Adding another
+# target is one entry here.
+#
+# `agent_deployment` is None for non-agent targets (e.g. `rag`, which is
+# a service consuming the same Obsidian Sync feed but without a chat
+# loop). The Telegram setup commands check for None and refuse; the
+# Obsidian setup commands work for all targets since they just write a
+# Secret + ConfigMap and bounce the sync sidecar.
 _AGENT_TARGETS = {
     "hermes": {
         "namespace": "hermes",
@@ -991,15 +995,27 @@ _AGENT_TARGETS = {
         "agent_deployment": "hermes",
         "obsidian_deployment": "obsidian-sync",
     },
+    "rag": {
+        "namespace": "rag",
+        "secret": "rag-secrets",
+        "agent_deployment": None,
+        "obsidian_deployment": "obsidian-sync",
+    },
 }
 
 
-def _resolve_agent_target(target: str) -> dict:
+def _resolve_agent_target(target: str, *, requires_agent: bool = False) -> dict:
     if target not in _AGENT_TARGETS:
         raise typer.BadParameter(
             f"Unknown target {target!r}. Valid: {list(_AGENT_TARGETS)}"
         )
-    return _AGENT_TARGETS[target]
+    cfg = _AGENT_TARGETS[target]
+    if requires_agent and not cfg.get("agent_deployment"):
+        raise typer.BadParameter(
+            f"Target {target!r} is not an agent — no agent_deployment to manage. "
+            f"This command applies to agents only."
+        )
+    return cfg
 
 
 @app.command("setup-telegram")
@@ -1020,7 +1036,7 @@ def setup_telegram(
     allows one polling client per bot — to migrate a bot from one agent
     to another, run `remove-telegram --target <old>` first.
     """
-    cfg = _resolve_agent_target(target)
+    cfg = _resolve_agent_target(target, requires_agent=True)
     if control is None:
         control = _get_control_host()
 
@@ -1057,7 +1073,7 @@ def remove_telegram(
     Deletes the Telegram token from the agent's cluster Secret and
     restarts the agent.
     """
-    cfg = _resolve_agent_target(target)
+    cfg = _resolve_agent_target(target, requires_agent=True)
     if control is None:
         control = _get_control_host()
 
@@ -1194,7 +1210,7 @@ def approve_pairing(
     use `allow-user --target <agent>` instead — that allowlists a
     numeric Telegram user ID directly.
     """
-    cfg = _resolve_agent_target(target)
+    cfg = _resolve_agent_target(target, requires_agent=True)
     if control is None:
         control = _get_control_host()
 
@@ -1235,7 +1251,7 @@ def allow_user(
     REPLACES the existing list — pass all the IDs you want allowed at
     once.
     """
-    cfg = _resolve_agent_target(target)
+    cfg = _resolve_agent_target(target, requires_agent=True)
     if control is None:
         control = _get_control_host()
 

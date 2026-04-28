@@ -21,7 +21,7 @@ spec:
             - name: VAULT_PATH
               value: /vault
             - name: CHROMADB_URL
-              value: http://chromadb.openclaw.svc.cluster.local:8000
+              value: http://chromadb.rag.svc.cluster.local:8000
             # llama-embed exposes OpenAI-compatible /v1/embeddings. The
             # EMBED_MODEL name must match the --alias baked into the
             # llama.cpp chat/embed ConfigMap (EMBED_SERVED_MODEL) — if they
@@ -48,4 +48,4 @@ spec:
       volumes:
         - name: vault
           persistentVolumeClaim:
-            claimName: obsidian-vault
+            claimName: rag-vault

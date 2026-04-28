@@ -237,9 +237,8 @@ namespace: llama-cpp
        ┌───────┴───────┐                     ┌───────┴────────┐
        │    Hermes     │                     │  rag-indexer   │
        │   (hermes)    │  ◄──MCP /sse──┐     │ + rag-mcp      │
-       └───────────────┘               │     │  (openclaw ns, │
-                                       └─────┤   pending      │
-                                             │   rename)      │
+       └───────────────┘               │     │   (rag ns)     │
+                                       └─────┤                │
                                              └────────────────┘
 ```
 
@@ -587,11 +586,8 @@ Pure git workflow — no Ansible, no DNS:
         │       ├── llama-cpp.yaml       # llama-chat + llama-embed pods
         │       ├── node-feature-discovery.yaml
         │       ├── nvidia-device-plugin.yaml
-        │       ├── obsidian-sync.yaml   # legacy: just owns the openclaw-namespace
-        │       │                          # vault PVCs; rag-indexer still mounts them
-        │       │                          # until the RAG pipeline is repointed at
-        │       │                          # hermes-vault.
         │       ├── hermes.yaml          # the agent runtime
+        │       ├── rag-obsidian-sync.yaml  # rag-side vault sync (independent of hermes)
         │       ├── prometheus-crds.yaml
         │       ├── rag-indexer.yaml
         │       ├── rag-mcp.yaml
@@ -602,14 +598,13 @@ Pure git workflow — no Ansible, no DNS:
             ├── garage/                  # configmap + service + statefulset
             ├── grafana-dashboards/      # ConfigMap-shipped dashboards (LLM, GPU, nodes)
             ├── llama-cpp/               # default ConfigMap + chat + embed deployments
-            ├── obsidian-sync/           # legacy PVC-only app: owns obsidian-vault
-            │                             # PVC that rag-indexer still mounts. Slated
-            │                             # for removal once RAG repoints at hermes-vault.
             ├── hermes/                   # the agent runtime
             │                             #   - configmap.yaml: hermes-model active served-as
-            │                             #   - obsidian-sync.yaml: vault sync sidecar
+            │                             #   - obsidian-sync.yaml: agent-side vault sync sidecar
             │                             #   - deployment.yaml: bootstrap-config init container
             │                             #     overlays config.yaml from configmap on every boot
+            ├── rag-obsidian-sync/        # rag-side vault sync — own PVC, own sidecar.
+            │                             # RAG pipeline is fully decoupled from any agent.
             ├── rag-indexer/             # CronJob/Deployment that indexes the vault
             ├── rag-mcp/                 # MCP search server backed by ChromaDB
             └── traefik-tls/             # wildcard TLS Secret for *.APPS_DOMAIN

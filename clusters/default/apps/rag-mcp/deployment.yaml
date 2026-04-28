@@ -24,7 +24,7 @@ spec:
             - name: MCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION
               value: "false"
             - name: CHROMADB_URL
-              value: http://chromadb.openclaw.svc.cluster.local:8000
+              value: http://chromadb.rag.svc.cluster.local:8000
             - name: LLAMA_URL
               value: http://llama-embed.llama-cpp.svc.cluster.local:8080
             - name: EMBED_MODEL
@@ -45,4 +45,4 @@ spec:
       volumes:
         - name: vault
           persistentVolumeClaim:
-            claimName: obsidian-vault
+            claimName: rag-vault

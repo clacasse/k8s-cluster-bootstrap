@@ -63,13 +63,19 @@ spec:
               "$H" config set model.default  "$MODEL_DEFAULT"
               "$H" config set model.provider "$MODEL_PROVIDER"
               "$H" config set model.base_url "$MODEL_BASE_URL"
+              # Wire up vault-search MCP. The rag pipeline (in the rag
+              # namespace) exposes its MCP server at the URL below;
+              # registering it here gives the agent semantic search over
+              # vault notes without needing a separate setup step.
+              "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
+              "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
               # The init container runs as root; the main container runs
               # as UID 10000. Without this chown the gateway can't edit
               # config.yaml at runtime (e.g. via dashboard or `hermes
               # setup`). The image entrypoint chowns the directory but
               # not files inside that we created.
               chown -R 10000:10000 /opt/data
-              echo "[bootstrap] applied model overlay"
+              echo "[bootstrap] applied model + MCP overlay"
           env:
             - name: MODEL_DEFAULT
               valueFrom:
@@ -80,6 +86,10 @@ spec:
               value: custom
             - name: MODEL_BASE_URL
               value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
+            - name: MCP_VAULT_SEARCH_URL
+              value: http://rag-mcp.rag.svc.cluster.local:8080/sse
+            - name: MCP_VAULT_SEARCH_TRANSPORT
+              value: sse
           volumeMounts:
             - name: data
               mountPath: /opt/data
