@@ -42,12 +42,18 @@ spec:
         # (compaction, terminal, memory, session reset, etc.).
         - name: bootstrap-config
           image: docker.io/nousresearch/hermes-agent:v2026.4.23
-          # Run as root so the chown at the end of the script can fix
-          # ownership of files this init writes for the hermes user
-          # (UID 10000) in the main container. The image's default user
-          # is hermes, which has write access but no CAP_CHOWN.
+          # Run as the hermes user (UID 10000) — same user the main
+          # gateway/dashboard containers run as. This matters because
+          # `hermes config set` triggers Hermes's logger, which creates
+          # /vault/logs/agent.log + errors.log on first invocation. If
+          # this init runs as root, those log files end up root-owned
+          # and the main container (UID 10000) crashloops on
+          # PermissionError when it tries to append. Running as 10000
+          # from the start keeps every file this init creates under the
+          # same ownership the runtime expects.
           securityContext:
-            runAsUser: 0
+            runAsUser: 10000
+            runAsGroup: 10000
           command: ["sh", "-c"]
           args:
             - |
@@ -70,11 +76,6 @@ spec:
               # the agent semantic search over vault notes.
               "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
               "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
-              # Init runs as root; main runs as hermes (UID 10000).
-              # Chown only the config file so the runtime user can edit
-              # it. Other vault contents are already hermes-owned via
-              # obsidian-sync's PUID=10000.
-              chown 10000:10000 "$cfg" 2>/dev/null || true
               echo "[bootstrap] applied model + MCP overlay"
           env:
             - name: MODEL_DEFAULT
