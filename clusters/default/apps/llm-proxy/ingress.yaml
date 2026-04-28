@@ -1,0 +1,33 @@
+# LAN-only Ingress for the llm-proxy. Exposes the OpenAI-compatible
+# chat completions endpoint (and the proxy's request logging) on
+# https://llm.APPS_DOMAIN so other machines on the home LAN can point
+# coding tools (pi.dev, Cline, etc.) at this base URL:
+#
+#   base_url: https://llm.APPS_DOMAIN/v1
+#   api_key:  anything (llama.cpp doesn't auth)
+#   model:    whatever CHAT_SERVED_MODEL currently maps to
+#
+# No auth — same threat model as the rest of the *.apps services
+# (Argo, Grafana, Hermes dashboard). Wildcard DNS for *.APPS_DOMAIN
+# resolves to the control node only inside the LAN, so reachability
+# requires being on the network.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-proxy
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: llm.APPS_DOMAIN
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-proxy
+                port:
+                  number: 8080
