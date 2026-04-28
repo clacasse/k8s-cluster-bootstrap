@@ -51,23 +51,25 @@ data:
   # -1 if you want full CoT and don't mind the cache hit.
   CHAT_REASONING_BUDGET: "0"
 
-  # --- Sampling: repetition control ---
-  # Defaults below tame degenerate-loop generation — Qwen3.6-A3B observed
-  # to fall into "NO_REPLY" / single-token loops on short-reply tasks
-  # (e.g. heartbeat checks where the natural answer is "HEARTBEAT_OK").
-  # Once the loop forms, sampling stays in it until max_tokens. The
-  # 16 KB of repeated tokens then gets persisted into conversation
-  # history forever, dragging through every cache eval afterwards.
+  # --- Sampling: repetition control (intentionally unset) ---
+  # CHAT_REPEAT_PENALTY and CHAT_REPEAT_LAST_N are NOT defaulted at
+  # the template level. The startup script in deployment-chat.yaml
+  # only emits the corresponding llama-server flags when these are
+  # set, so leaving them blank means llama-server uses its own
+  # built-in defaults (penalty 1.0 = no penalty, last_n 64).
   #
-  # Repeat penalty in [1.0, 1.3] is the conservative band — values
-  # >1.3 start to break legitimate repeated phrases (proper nouns,
-  # boilerplate). 1.15 lands in the "loops break, prose stays
-  # natural" zone for Qwen3-class models.
-  CHAT_REPEAT_PENALTY: "1.15"
-  # Window for the penalty: how many recent tokens get checked for
-  # repeats. 64 is standard; bump higher for longer-range repetition,
-  # but the cost rises with the window.
-  CHAT_REPEAT_LAST_N: "64"
+  # Why: penalty != 1.0 is a model-and-workload-specific intervention,
+  # not a global preference. Qwen3.6-A3B benefits from ~1.15 to tame
+  # degenerate "NO_REPLY" / single-token loops on short-reply tasks;
+  # but agentic coding workloads (pi.dev, Claude Code-style) often
+  # legitimately repeat similar tool-call shapes, where the penalty
+  # makes the model substitute "Already done." for the next call and
+  # the agent stalls.
+  #
+  # Operators set these per-deployment via:
+  #   cluster_manager.py llama set-repeat-penalty <float>
+  #   cluster_manager.py llama set-repeat-last-n <int>
+  # An empty/absent value disables the flag entirely.
 
   # --- MoE expert offloading ---
   # `on` adds --cpu-moe so MoE expert FFN tensors stay in host RAM and

@@ -1482,8 +1482,8 @@ def llama_list(
     for key in _LLAMA_CHAT_KEYS:
         if key in ("CHAT_MODEL_REPO", "CHAT_MODEL_FILE", "CHAT_SERVED_MODEL"):
             continue
-        val = data.get(key, "?")
-        display = val if val else "[dim](empty)[/dim]"
+        val = data.get(key, "")
+        display = val if val else "[dim](unset — llama.cpp default)[/dim]"
         console.print(f"  {_mark(key)}{key} = {display}")
 
     console.print(
@@ -1597,8 +1597,12 @@ _LLAMA_SETUP_DEFAULTS = {
     "CHAT_KV_UNIFIED":     "off",
     "CHAT_FLASH_ATTN":     "on",
     "CHAT_REASONING_BUDGET": "0",
-    "CHAT_REPEAT_PENALTY": "1.15",
-    "CHAT_REPEAT_LAST_N":  "64",
+    # CHAT_REPEAT_PENALTY / CHAT_REPEAT_LAST_N are intentionally absent.
+    # They're model-and-workload-specific tunables; the deployment
+    # script omits the corresponding llama-server flags entirely when
+    # the env vars are unset, so llama.cpp falls back to its built-in
+    # defaults (1.0 = off, 64). Operators that need a non-default tune
+    # via `llama set-repeat-penalty` / `llama set-repeat-last-n`.
     "CHAT_CPU_MOE":        "off",
     "CHAT_N_CPU_MOE":      "0",
     "CHAT_OVERRIDE_TENSOR": "",
@@ -1935,6 +1939,69 @@ def llama_set_reasoning_budget(
     if control is None:
         control = _get_control_host()
     _llama_set_single(control, "CHAT_REASONING_BUDGET", str(tokens))
+
+
+@llama_app.command("set-repeat-penalty")
+def llama_set_repeat_penalty(
+    penalty: str = typer.Argument(
+        None,
+        help="Repeat penalty (e.g. 1.15). Omit to unset the override and "
+             "fall back to llama.cpp's built-in default (1.0 = no penalty).",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Set or clear CHAT_REPEAT_PENALTY.
+
+    Penalty values >1.0 down-weight tokens that recently appeared in the
+    output. Useful to break degenerate loops on chat models (e.g.
+    Qwen3.6-A3B benefits from ~1.15) — but the SAME penalty makes
+    agentic coding loops stall, because the model substitutes "Already
+    done." for legitimately-similar repeated tool calls. There's no
+    universally-correct value, which is why the project template ships
+    this knob unset; operators tune per-deployment.
+
+    Pass no argument to remove the override — llama-server then uses
+    its built-in default (1.0 = off).
+    """
+    if control is None:
+        control = _get_control_host()
+    if penalty is None:
+        console.print(f"Unsetting [cyan]CHAT_REPEAT_PENALTY[/cyan] (revert to llama.cpp default)")
+        _llama_patch_model_config(control, {"CHAT_REPEAT_PENALTY": None})
+        _restart_deployment(control, LLAMA_NS, "llama-chat")
+        console.print("[green]Done.[/green] llama-chat restarting.")
+    else:
+        _llama_set_single(control, "CHAT_REPEAT_PENALTY", penalty)
+
+
+@llama_app.command("set-repeat-last-n")
+def llama_set_repeat_last_n(
+    last_n: str = typer.Argument(
+        None,
+        help="Lookback window in tokens (e.g. 64). Omit to unset and fall "
+             "back to llama.cpp's default (64).",
+    ),
+    control: str = typer.Option(None, "--control", "-c"),
+) -> None:
+    """Set or clear CHAT_REPEAT_LAST_N.
+
+    The lookback window for --repeat-penalty: how many recent tokens
+    are checked when computing the penalty. Larger windows catch
+    longer-range repetition at higher cost; 64 is the standard pick.
+    Mostly useful only when CHAT_REPEAT_PENALTY is also set.
+
+    Pass no argument to remove the override — llama-server then uses
+    its built-in default.
+    """
+    if control is None:
+        control = _get_control_host()
+    if last_n is None:
+        console.print(f"Unsetting [cyan]CHAT_REPEAT_LAST_N[/cyan] (revert to llama.cpp default)")
+        _llama_patch_model_config(control, {"CHAT_REPEAT_LAST_N": None})
+        _restart_deployment(control, LLAMA_NS, "llama-chat")
+        console.print("[green]Done.[/green] llama-chat restarting.")
+    else:
+        _llama_set_single(control, "CHAT_REPEAT_LAST_N", last_n)
 
 
 @llama_app.command("set-cpu-moe")

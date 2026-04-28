@@ -97,6 +97,19 @@ spec:
               case "${CHAT_KV_UNIFIED:-off}" in
                 on|true|1) kv_unified_args="--kv-unified" ;;
               esac
+              # Repeat-penalty knobs are unset by default — letting
+              # llama-server use its own built-in defaults (penalty 1.0
+              # = off, last_n 64). Only emit the flags if the operator
+              # explicitly sets values via `llama set-repeat-penalty`
+              # / `llama set-repeat-last-n`. Treats blank ConfigMap
+              # entries the same as missing.
+              repeat_args=""
+              if [ -n "${CHAT_REPEAT_PENALTY:-}" ]; then
+                repeat_args="--repeat-penalty ${CHAT_REPEAT_PENALTY}"
+              fi
+              if [ -n "${CHAT_REPEAT_LAST_N:-}" ]; then
+                repeat_args="${repeat_args} --repeat-last-n ${CHAT_REPEAT_LAST_N}"
+              fi
               # Flags composed from named ConfigMap fields so each is
               # discoverable + individually tunable via `llama set-*`.
               # CHAT_EXTRA_FLAGS is the escape hatch for anything not
@@ -113,8 +126,7 @@ spec:
                 -ctk "${CHAT_KV_TYPE}" -ctv "${CHAT_KV_TYPE}" \
                 --flash-attn "${CHAT_FLASH_ATTN}" \
                 --reasoning-budget "${CHAT_REASONING_BUDGET}" \
-                --repeat-penalty "${CHAT_REPEAT_PENALTY}" \
-                --repeat-last-n "${CHAT_REPEAT_LAST_N}" \
+                ${repeat_args} \
                 ${moe_args} \
                 ${override_args} \
                 ${kv_unified_args} \
