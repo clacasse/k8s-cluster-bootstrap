@@ -76,6 +76,12 @@ spec:
               # the agent semantic search over vault notes.
               "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
               "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
+              # Wire up deal-signal MCP. The deal-signal namespace runs
+              # its own MCP server exposing real-estate market metrics
+              # (cap rate, price-to-rent, market momentum, etc.) backed
+              # by the deal-signal Postgres + nightly ingest cronjobs.
+              "$H" config set "mcp_servers.deal-signal.url"       "$MCP_DEAL_SIGNAL_URL"
+              "$H" config set "mcp_servers.deal-signal.transport" "$MCP_DEAL_SIGNAL_TRANSPORT"
               echo "[bootstrap] applied model + MCP overlay"
           env:
             - name: MODEL_DEFAULT
@@ -96,6 +102,14 @@ spec:
             # is informational only — Hermes doesn't actually have a
             # transport selector in its config schema.
             - name: MCP_VAULT_SEARCH_TRANSPORT
+              value: streamable-http
+            - name: MCP_DEAL_SIGNAL_URL
+              # Trailing slash IS required here — deal-signal-mcp does
+              # `app.mount("/mcp", ...)` with FastMCP's
+              # `streamable_http_path="/"`, so the live endpoint is
+              # /mcp/. Hitting /mcp would 307-redirect and lose the body.
+              value: http://deal-signal-mcp.deal-signal.svc.cluster.local:8080/mcp/
+            - name: MCP_DEAL_SIGNAL_TRANSPORT
               value: streamable-http
           volumeMounts:
             - name: vault
