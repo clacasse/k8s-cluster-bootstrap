@@ -10,7 +10,7 @@ spec:
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    targetRevision: 83.6.0
+    targetRevision: 84.3.0
     helm:
       releaseName: kube-prometheus-stack
       skipCrds: true
