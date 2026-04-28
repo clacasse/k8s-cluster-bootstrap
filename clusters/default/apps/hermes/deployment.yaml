@@ -52,13 +52,21 @@ spec:
           args:
             - |
               set -e
-              cfg=/opt/data/config.yaml
+              # HERMES_HOME points at the obsidian vault PVC so all of
+              # Hermes's state (config, skills, memories, sessions,
+              # persona files) lives in one place: the same vault the
+              # user edits in Obsidian. obsidian-sync keeps it aligned
+              # with the upstream cloud vault. Trade-off: the .env,
+              # session jsonl, and logs/ subdirs sync to other devices
+              # too — add ignore patterns in Obsidian's sync settings
+              # if that's not desired.
+              export HERMES_HOME=/vault
+              cfg="$HERMES_HOME/config.yaml"
               H=/opt/hermes/.venv/bin/hermes
               if [ ! -f "$cfg" ]; then
                 cp /opt/hermes/cli-config.yaml.example "$cfg"
                 echo "[bootstrap] seeded $cfg from cli-config.yaml.example"
               fi
-              export HERMES_HOME=/opt/data
               "$H" config set model.default  "$MODEL_DEFAULT"
               "$H" config set model.provider "$MODEL_PROVIDER"
               "$H" config set model.base_url "$MODEL_BASE_URL"
@@ -68,12 +76,12 @@ spec:
               # vault notes without needing a separate setup step.
               "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
               "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
-              # The init container runs as root; the main container runs
-              # as UID 10000. Without this chown the gateway can't edit
-              # config.yaml at runtime (e.g. via dashboard or `hermes
-              # setup`). The image entrypoint chowns the directory but
-              # not files inside that we created.
-              chown -R 10000:10000 /opt/data
+              # Init container runs as root; the main container runs as
+              # UID 10000. Chown only the config file we wrote — chowning
+              # the whole vault recursively would be expensive on a large
+              # vault, and obsidian-sync already keeps the rest at
+              # 10000:10000 (PUID/PGID match in apps/hermes/obsidian-sync.yaml).
+              chown 10000:10000 "$cfg" 2>/dev/null || true
               echo "[bootstrap] applied model + MCP overlay"
           env:
             - name: MODEL_DEFAULT
@@ -94,8 +102,8 @@ spec:
             - name: MCP_VAULT_SEARCH_TRANSPORT
               value: streamable-http
           volumeMounts:
-            - name: data
-              mountPath: /opt/data
+            - name: vault
+              mountPath: /vault
       containers:
         - name: hermes
           # Upstream image — pinned to a tagged release rather than :latest
@@ -110,10 +118,10 @@ spec:
             - gateway
             - run
           env:
-            # Hermes config root. Default is /opt/data per the image; setting
-            # explicitly so the value is visible in the manifest.
+            # HERMES_HOME points at the vault — all config, skills,
+            # memories, sessions, and persona files live in /vault.
             - name: HERMES_HOME
-              value: /opt/data
+              value: /vault
             # Local llama.cpp via llm-proxy. The proxy logs every request
             # as JSONL and exports per-call latency metrics.
             - name: HERMES_INFERENCE_PROVIDER
@@ -122,11 +130,11 @@ spec:
               value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
             - name: OPENAI_API_KEY
               value: hermes-local   # placeholder; llama.cpp ignores auth
-            # NOTE: HERMES_MODEL was removed — per Hermes docs it only
-            # affects the cron scheduler, not chat. The chat path reads
-            # model.default from /opt/data/config.yaml, which the
-            # bootstrap-config init container above keeps in sync with
-            # the hermes-model ConfigMap.
+            # NOTE: HERMES_MODEL is intentionally NOT set — per the
+            # Hermes docs it only affects the cron scheduler, not chat.
+            # The chat path reads model.default from $HERMES_HOME/config.yaml,
+            # which the bootstrap-config init container above keeps in
+            # sync with the hermes-model ConfigMap.
             # Telegram bot token. Marked optional so the pod boots
             # cleanly before the secret exists; Hermes silently skips
             # Telegram in that case.
@@ -161,17 +169,15 @@ spec:
               cpu: "1"
               memory: 2Gi
           volumeMounts:
-            - name: data
-              mountPath: /opt/data
-            # Hermes-side vault, populated by the obsidian-sync sidecar
-            # in this namespace. Empty until setup-obsidian --target hermes
-            # has been run.
+            # /vault is HERMES_HOME — config, skills, memories, sessions,
+            # persona files. Populated by the obsidian-sync sidecar in
+            # this namespace.
             - name: vault
               mountPath: /vault
         # Web dashboard sidecar. Hermes splits the gateway (messaging +
         # cron) and the dashboard (FastAPI/React UI for config/sessions)
         # into separate processes; running both as sidecars in one pod
-        # lets them share /opt/data without an extra Deployment.
+        # lets them share /vault without an extra Deployment.
         # `--insecure` is required to bind off 127.0.0.1 — the dashboard
         # refuses by default because it exposes provider API keys via
         # its config-edit endpoints. We accept that here because the
@@ -188,7 +194,7 @@ spec:
             - --no-open
           env:
             - name: HERMES_HOME
-              value: /opt/data
+              value: /vault
           ports:
             - name: http
               containerPort: 9119
@@ -200,12 +206,9 @@ spec:
               cpu: 500m
               memory: 768Mi
           volumeMounts:
-            - name: data
-              mountPath: /opt/data
+            - name: vault
+              mountPath: /vault
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: hermes-data
         - name: vault
           persistentVolumeClaim:
             claimName: hermes-vault
