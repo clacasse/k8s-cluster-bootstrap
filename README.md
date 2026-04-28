@@ -615,7 +615,11 @@ Pure git workflow — no Ansible, no DNS:
             ├── llama-cpp/               # default ConfigMap + chat + embed deployments
             ├── obsidian-sync/           # Headless Obsidian Sync for openclaw workspace
             ├── openclaw/                # the agent gateway
-            ├── hermes/                  # alternate agent runtime + its own obsidian-sync sidecar
+            ├── hermes/                  # alternate agent runtime
+            │                             #   - configmap.yaml: hermes-model active served-as
+            │                             #   - obsidian-sync.yaml: per-namespace vault sync
+            │                             #   - deployment.yaml: bootstrap-config init container
+            │                             #     overlays config.yaml from configmap on every boot
             ├── rag-indexer/             # CronJob/Deployment that indexes the vault
             ├── rag-mcp/                 # MCP search server backed by ChromaDB
             └── traefik-tls/             # wildcard TLS Secret for *.APPS_DOMAIN

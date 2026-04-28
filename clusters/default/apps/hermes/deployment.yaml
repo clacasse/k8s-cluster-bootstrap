@@ -26,6 +26,57 @@ spec:
       # forever.
       nodeSelector:
         kubernetes.io/hostname: k3s-control
+      initContainers:
+        # Bootstrap /opt/data/config.yaml so the model points at our
+        # local llama.cpp endpoint instead of the OpenRouter+Claude
+        # default the image's entrypoint would otherwise seed.
+        #
+        # Runs before the gateway and dashboard containers — they share
+        # the same /opt/data PVC. Idempotent: every boot re-applies the
+        # overlay, so editing this manifest (or the hermes-model
+        # ConfigMap) is enough to redirect Hermes; no manual
+        # `hermes config set` ever needed.
+        #
+        # Falls back to seeding /opt/data/config.yaml from the bundled
+        # cli-config.yaml.example on a fresh PVC, then overlays our
+        # values on top — preserves all the non-model defaults
+        # (compaction, terminal, memory, session reset, etc.).
+        - name: bootstrap-config
+          image: docker.io/nousresearch/hermes-agent:v2026.4.23
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              cfg=/opt/data/config.yaml
+              H=/opt/hermes/.venv/bin/hermes
+              if [ ! -f "$cfg" ]; then
+                cp /opt/hermes/cli-config.yaml.example "$cfg"
+                echo "[bootstrap] seeded $cfg from cli-config.yaml.example"
+              fi
+              export HERMES_HOME=/opt/data
+              "$H" config set model.default  "$MODEL_DEFAULT"
+              "$H" config set model.provider "$MODEL_PROVIDER"
+              "$H" config set model.base_url "$MODEL_BASE_URL"
+              # The init container runs as root; the main container runs
+              # as UID 10000. Without this chown the gateway can't edit
+              # config.yaml at runtime (e.g. via dashboard or `hermes
+              # setup`). The image entrypoint chowns the directory but
+              # not files inside that we created.
+              chown -R 10000:10000 /opt/data
+              echo "[bootstrap] applied model overlay"
+          env:
+            - name: MODEL_DEFAULT
+              valueFrom:
+                configMapKeyRef:
+                  name: hermes-model
+                  key: active-model
+            - name: MODEL_PROVIDER
+              value: custom
+            - name: MODEL_BASE_URL
+              value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
       containers:
         - name: hermes
           # Upstream image — pinned to a tagged release rather than :latest
@@ -54,13 +105,11 @@ spec:
               value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
             - name: OPENAI_API_KEY
               value: hermes-local   # placeholder; llama.cpp ignores auth
-            # Process-level model override. The cli-config.yaml.example the
-            # entrypoint seeds the volume with otherwise targets OpenRouter
-            # and a Claude model, neither of which exist in this cluster.
-            # HERMES_MODEL forces the served-as id from llama-chat
-            # (CHAT_SERVED_MODEL).
-            - name: HERMES_MODEL
-              value: qwen3.6-35b-a3b
+            # NOTE: HERMES_MODEL was removed — per Hermes docs it only
+            # affects the cron scheduler, not chat. The chat path reads
+            # model.default from /opt/data/config.yaml, which the
+            # bootstrap-config init container above keeps in sync with
+            # the hermes-model ConfigMap.
             # Telegram bot token. Same key name as openclaw-secrets so the
             # operator can copy the value cross-namespace with one kubectl
             # command. Marked optional so the pod boots cleanly before
