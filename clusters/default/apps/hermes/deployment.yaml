@@ -84,15 +84,48 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /opt/data
-            # NOTE: vault mount intentionally absent in v1. The
-            # obsidian-vault PVC is namespace-scoped to openclaw and can't
-            # be mounted into hermes directly. Two follow-on options
-            # documented in the README under "Hermes vault setup":
-            #   1. Run a separate obsidian-sync sidecar in this namespace
-            #      that syncs the same upstream Obsidian Sync vault to a
-            #      hermes-vault PVC.
-            #   2. After cutover from openclaw, migrate the vault PVC by
-            #      copying contents and binding here.
+        # Web dashboard sidecar. Hermes splits the gateway (messaging +
+        # cron) and the dashboard (FastAPI/React UI for config/sessions)
+        # into separate processes; running both as sidecars in one pod
+        # lets them share /opt/data without an extra Deployment.
+        # `--insecure` is required to bind off 127.0.0.1 — the dashboard
+        # refuses by default because it exposes provider API keys via
+        # its config-edit endpoints. We accept that here because the
+        # cluster is LAN-only behind an Ingress with TLS.
+        - name: dashboard
+          image: docker.io/nousresearch/hermes-agent:v2026.4.23
+          args:
+            - dashboard
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9119"
+            - --insecure
+            - --no-open
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+          ports:
+            - name: http
+              containerPort: 9119
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
+      # NOTE: vault mount intentionally absent in v1. The obsidian-vault
+      # PVC is namespace-scoped to openclaw and can't be mounted into
+      # hermes directly. Two follow-on options:
+      #   1. Run a separate obsidian-sync sidecar in this namespace that
+      #      syncs the same upstream Obsidian Sync vault to a hermes-vault
+      #      PVC.
+      #   2. After cutover from openclaw, migrate the vault PVC by copying
+      #      contents and binding here.
       volumes:
         - name: data
           persistentVolumeClaim:
