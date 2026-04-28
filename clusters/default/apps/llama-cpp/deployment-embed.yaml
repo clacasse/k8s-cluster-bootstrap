@@ -51,7 +51,7 @@ spec:
         - name: llama-server
           # Plain CPU image. Smaller than server-cuda and doesn't need
           # the nvidia runtime, so it's happy on any node.
-          image: ghcr.io/ggml-org/llama.cpp:server-b8895
+          image: ghcr.io/ggml-org/llama.cpp:server-b8958
           ports:
             - name: http
               containerPort: 8080
