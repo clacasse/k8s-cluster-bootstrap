@@ -17,6 +17,7 @@ See [docs/architecture.md](./docs/architecture.md) for a Mermaid diagram of the 
 - **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot. Built-in support for MoE expert offloading (`--cpu-moe` / `--n-cpu-moe`) so 30B-class MoEs run on a 16 GB-class GPU.
 - **llm-proxy** in front of the chat server — logs every request as JSONL, exports per-call latency metrics, lets you replay traffic without enabling llama.cpp's own slow-path logger.
 - **OpenClaw** agent runtime at `https://openclaw.apps`. Speaks MCP outward to anything you wire up; Slack + Telegram channels for chat; Obsidian vault as the workspace.
+- **Hermes** agent runtime at `https://hermes.apps` (optional, opt-in). Sibling-class agent to OpenClaw — Slack/Telegram/Discord channels, MCP, Obsidian vault, persistent memory + skills. Deploys side-by-side for comparison; tagged image consumed directly from Docker Hub.
 - **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes.
 - Model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template ships no opinion about which model your cluster runs).
 
@@ -406,24 +407,29 @@ Prompts for your Slack Bot Token (`xoxb-...`) and App Token (`xapp-...`) from ht
 ### Connect Telegram (optional)
 
 ```bash
+# Default target is OpenClaw
 ./scripts/cluster_manager.py setup-telegram
+
+# Or target Hermes (or any other registered agent)
+./scripts/cluster_manager.py setup-telegram --target hermes
 ```
 
-Prompts for your bot token from BotFather. Stores it, restarts OpenClaw. `remove-telegram` to delete.
+Prompts for your bot token from BotFather. Stores it in the agent's Secret and restarts the agent. `remove-telegram --target <name>` deletes it. Telegram only allows one polling client per bot — to migrate a token between agents, run `remove-telegram --target <old>` first, then `setup-telegram --target <new>`.
 
 ### Set up Obsidian Sync workspace (optional)
 
-OpenClaw's workspace can be synced with your Obsidian vault via the official headless sync client. Edit notes on any device — they appear in the agent's workspace automatically.
+Each agent has its own `obsidian-sync` sidecar pulling from upstream Obsidian Sync into a per-agent vault PVC. Both agents stay aligned because Obsidian Sync is the source-of-truth — edit notes on any device, both agents see them. (PVCs are namespace-scoped + ReadWriteOnce, so we can't share one PVC across agents; running two sync clients is the workaround.)
 
 ```bash
 # 1. Get your auth token (one-time, interactive — prompts for email/password/MFA)
 docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest
 
-# 2. Configure the cluster with the token and vault name
-./scripts/cluster_manager.py setup-obsidian
+# 2. Configure the cluster — pick the target agent
+./scripts/cluster_manager.py setup-obsidian                    # OpenClaw (default)
+./scripts/cluster_manager.py setup-obsidian --target hermes
 ```
 
-The sync pod runs continuously in the `openclaw` namespace, keeping the vault PVC in sync with Obsidian Sync. OpenClaw reads and writes to the same PVC as its workspace.
+The sync pod runs in the agent's namespace, keeping its vault PVC in lockstep with the upstream Obsidian Sync vault. The agent reads and writes to that PVC as its workspace.
 
 ### Convert instance repo from public to private
 
@@ -531,8 +537,8 @@ Pure git workflow — no Ansible, no DNS:
 | `add-image-pull-secret <namespace> <name>` | Provision an image-pull Secret for a private registry. |
 | `add-repo-secret <name>` | Register a git repository with Argo CD as a Repository Secret. |
 | `setup-slack` / `remove-slack` | Configure or remove Slack bot + app tokens for OpenClaw. |
-| `setup-telegram` / `remove-telegram` | Configure or remove Telegram bot token for OpenClaw. |
-| `setup-obsidian` | Configure Obsidian Sync for the OpenClaw workspace. |
+| `setup-telegram [--target <agent>]` / `remove-telegram [--target <agent>]` | Configure or remove the Telegram bot token for the chosen agent (`openclaw` default, or `hermes`). One bot per polling client — migrate a token by `remove`-ing from the old target first, then `setup`-ing on the new one. |
+| `setup-obsidian [--target <agent>]` | Configure Obsidian Sync for the chosen agent's workspace. Each agent owns its own vault PVC; both stay aligned via the shared upstream Obsidian Sync vault. |
 | `approve-pairing <channel> <code>` | Approve a user's pairing request (e.g. `slack HPP2WU9B`). |
 
 ### Private apps repos
@@ -596,6 +602,7 @@ Pure git workflow — no Ansible, no DNS:
         │       ├── nvidia-device-plugin.yaml
         │       ├── obsidian-sync.yaml
         │       ├── openclaw.yaml
+        │       ├── hermes.yaml          # optional sibling agent for comparison
         │       ├── prometheus-crds.yaml
         │       ├── rag-indexer.yaml
         │       ├── rag-mcp.yaml
@@ -606,8 +613,9 @@ Pure git workflow — no Ansible, no DNS:
             ├── garage/                  # configmap + service + statefulset
             ├── grafana-dashboards/      # ConfigMap-shipped dashboards (LLM, GPU, nodes)
             ├── llama-cpp/               # default ConfigMap + chat + embed deployments
-            ├── obsidian-sync/           # Headless Obsidian Sync for workspace
+            ├── obsidian-sync/           # Headless Obsidian Sync for openclaw workspace
             ├── openclaw/                # the agent gateway
+            ├── hermes/                  # alternate agent runtime + its own obsidian-sync sidecar
             ├── rag-indexer/             # CronJob/Deployment that indexes the vault
             ├── rag-mcp/                 # MCP search server backed by ChromaDB
             └── traefik-tls/             # wildcard TLS Secret for *.APPS_DOMAIN
