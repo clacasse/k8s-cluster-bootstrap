@@ -105,13 +105,23 @@ def _ensure_namespace(control: str, namespace: str) -> None:
 
 
 def _patch_secret(control: str, namespace: str, name: str, data: dict[str, str]) -> None:
-    """Patch a k8s Secret with base64-encoded key/value pairs. Use None values to delete keys."""
+    """Patch a k8s Secret with base64-encoded key/value pairs. Use None values to delete keys.
+
+    Creates the Secret first if it doesn't exist — `kubectl patch` errors
+    on missing resources, which made `setup-telegram --target hermes`
+    fail the first time it ran on a fresh namespace.
+    """
     encoded = {}
     for k, v in data.items():
         if v is None:
             encoded[k] = None
         else:
             encoded[k] = base64.b64encode(v.encode()).decode()
+
+    if not _kubectl_exists(control, namespace, "secret", name):
+        _ssh(control,
+            f"sudo k3s kubectl -n {_q(namespace)} create secret generic {_q(name)}",
+        )
 
     import json
     patch = json.dumps({"data": encoded})
