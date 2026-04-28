@@ -84,6 +84,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /opt/data
+            # Hermes-side vault, populated by the obsidian-sync sidecar
+            # in this namespace. Empty until setup-obsidian --target hermes
+            # has been run.
+            - name: vault
+              mountPath: /vault
         # Web dashboard sidecar. Hermes splits the gateway (messaging +
         # cron) and the dashboard (FastAPI/React UI for config/sessions)
         # into separate processes; running both as sidecars in one pod
@@ -118,15 +123,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /opt/data
-      # NOTE: vault mount intentionally absent in v1. The obsidian-vault
-      # PVC is namespace-scoped to openclaw and can't be mounted into
-      # hermes directly. Two follow-on options:
-      #   1. Run a separate obsidian-sync sidecar in this namespace that
-      #      syncs the same upstream Obsidian Sync vault to a hermes-vault
-      #      PVC.
-      #   2. After cutover from openclaw, migrate the vault PVC by copying
-      #      contents and binding here.
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: hermes-data
+        - name: vault
+          persistentVolumeClaim:
+            claimName: hermes-vault

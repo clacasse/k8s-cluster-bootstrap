@@ -1,0 +1,100 @@
+# Per-namespace Obsidian Sync sidecar for Hermes.
+#
+# Mirrors the openclaw obsidian-sync setup but writes to a hermes-vault
+# PVC in this namespace. Both agents end up with their own local copy of
+# the vault, kept aligned via Obsidian Sync upstream as the source of
+# truth. This is what unblocks running both agents side-by-side: PVCs
+# are namespace-scoped and ReadWriteOnce, so we can't share one across
+# namespaces; running two sync clients against the same upstream vault
+# is the cleanest workaround.
+#
+# The Secret and ConfigMap referenced here are populated by:
+#   cluster_manager.py setup-obsidian --target hermes
+# Both env refs are optional so the pod boots cleanly before that runs;
+# obsidian-sync logs an auth error and idles until the secret arrives.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-vault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hermes-obsidian-sync-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: obsidian-sync
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: obsidian-sync
+  template:
+    metadata:
+      labels:
+        app: obsidian-sync
+    spec:
+      # Pin to k3s-control so the local-path PVCs land on the same node
+      # as the hermes pod (they need to be co-located for hermes to mount
+      # hermes-vault at /vault).
+      nodeSelector:
+        kubernetes.io/hostname: k3s-control
+      containers:
+        - name: obsidian-sync
+          image: ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+          env:
+            - name: OBSIDIAN_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-secrets
+                  key: obsidian-auth-token
+                  optional: true
+            - name: VAULT_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: obsidian-config
+                  key: vault-name
+                  optional: true
+            - name: SYNC_MODE
+              value: bidirectional
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: vault
+              mountPath: /vault
+            - name: config
+              mountPath: /home/obsidian/.config
+      volumes:
+        - name: vault
+          persistentVolumeClaim:
+            claimName: hermes-vault
+        - name: config
+          persistentVolumeClaim:
+            claimName: hermes-obsidian-sync-config

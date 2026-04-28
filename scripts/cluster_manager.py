@@ -1065,19 +1065,54 @@ def remove_slack(
     console.print(f"[green]Slack tokens removed. OpenClaw restarting.[/green]")
 
 
+# Per-agent locations the channel/integration commands write to. Both
+# openclaw and hermes use the same shape — a Secret named <agent>-secrets
+# in a namespace named <agent>, plus a Deployment named <agent> for the
+# agent itself and `obsidian-sync` for the sync sidecar. Adding a third
+# agent later is one entry here.
+_AGENT_TARGETS = {
+    "openclaw": {
+        "namespace": "openclaw",
+        "secret": "openclaw-secrets",
+        "agent_deployment": "openclaw",
+        "obsidian_deployment": "obsidian-sync",
+    },
+    "hermes": {
+        "namespace": "hermes",
+        "secret": "hermes-secrets",
+        "agent_deployment": "hermes",
+        "obsidian_deployment": "obsidian-sync",
+    },
+}
+
+
+def _resolve_agent_target(target: str) -> dict:
+    if target not in _AGENT_TARGETS:
+        raise typer.BadParameter(
+            f"Unknown target {target!r}. Valid: {list(_AGENT_TARGETS)}"
+        )
+    return _AGENT_TARGETS[target]
+
+
 @app.command("setup-telegram")
 def setup_telegram(
+    target: str = typer.Option(
+        "openclaw", "--target", "-t",
+        help=f"Agent to configure. One of {list(_AGENT_TARGETS)}.",
+    ),
     control: str = typer.Option(
         None, "--control", "-c",
         help="Control node host. Auto-detected from inventory if not provided.",
     ),
 ) -> None:
-    """Configure Telegram integration for OpenClaw.
+    """Configure Telegram integration for the chosen agent.
 
     Prompts for the Telegram Bot Token (from @BotFather). Stores it in
-    the cluster Secret and restarts the OpenClaw pod.
+    the agent's cluster Secret and restarts the agent pod. Telegram only
+    allows one polling client per bot — to migrate a bot from one agent
+    to another, run `remove-telegram --target <old>` first.
     """
-
+    cfg = _resolve_agent_target(target)
     if control is None:
         control = _get_control_host()
 
@@ -1086,58 +1121,71 @@ def setup_telegram(
 
     bot_token = typer.prompt("Telegram Bot Token")
 
-    _patch_secret(control, "openclaw", "openclaw-secrets", {
+    _patch_secret(control, cfg["namespace"], cfg["secret"], {
         "telegram-bot-token": bot_token,
     })
-    _restart_deployment(control, "openclaw", "openclaw")
-    console.print(f"\n[green]Telegram bot configured. OpenClaw restarting.[/green]")
+    _restart_deployment(control, cfg["namespace"], cfg["agent_deployment"])
+    console.print(f"\n[green]Telegram bot configured for {target}. {cfg['agent_deployment']} restarting.[/green]")
     console.print(f"\nOnce someone messages the bot on Telegram, approve them with:")
     console.print(f"  ./scripts/cluster_manager.py approve-pairing telegram <CODE>")
 
 
 @app.command("remove-telegram")
 def remove_telegram(
+    target: str = typer.Option(
+        "openclaw", "--target", "-t",
+        help=f"Agent to remove Telegram from. One of {list(_AGENT_TARGETS)}.",
+    ),
     control: str = typer.Option(
         None, "--control", "-c",
         help="Control node host. Auto-detected from inventory if not provided.",
     ),
 ) -> None:
-    """Remove Telegram integration from OpenClaw.
+    """Remove Telegram integration from the chosen agent.
 
-    Deletes the Telegram token from the cluster Secret and restarts OpenClaw.
+    Deletes the Telegram token from the agent's cluster Secret and
+    restarts the agent.
     """
+    cfg = _resolve_agent_target(target)
     if control is None:
         control = _get_control_host()
 
-    if not typer.confirm("This will remove Telegram integration and delete the bot token. Continue?"):
+    if not typer.confirm(f"This will remove Telegram integration from {target} and delete the bot token. Continue?"):
         raise typer.Exit(0)
 
     console.print(f"[dim]via {control}[/dim]\n")
 
-    _patch_secret(control, "openclaw", "openclaw-secrets", {
+    _patch_secret(control, cfg["namespace"], cfg["secret"], {
         "telegram-bot-token": None,
     })
-    _restart_deployment(control, "openclaw", "openclaw")
-    console.print(f"[green]Telegram token removed. OpenClaw restarting.[/green]")
+    _restart_deployment(control, cfg["namespace"], cfg["agent_deployment"])
+    console.print(f"[green]Telegram token removed from {target}. {cfg['agent_deployment']} restarting.[/green]")
 
 
 @app.command("setup-obsidian")
 def setup_obsidian(
+    target: str = typer.Option(
+        "openclaw", "--target", "-t",
+        help=f"Agent to configure. One of {list(_AGENT_TARGETS)}.",
+    ),
     control: str = typer.Option(
         None, "--control", "-c",
         help="Control node host. Auto-detected from inventory if not provided.",
     ),
 ) -> None:
-    """Configure Obsidian Sync for the workspace.
+    """Configure Obsidian Sync for the chosen agent's vault.
 
     Prompts for your Obsidian auth token and vault name. The token is
     obtained by running:
       docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-sync-docker:latest
 
-    Stores the token in the cluster Secret and vault name in a ConfigMap,
-    then restarts the sync pod.
+    Stores the token in the agent's Secret and vault name in an
+    obsidian-config ConfigMap in the same namespace, then restarts the
+    sync pod. Each agent has its own obsidian-sync sidecar with its own
+    PVC — they share the upstream Obsidian Sync vault, not the local
+    PVC, because PVCs are namespace-scoped and ReadWriteOnce.
     """
-
+    cfg = _resolve_agent_target(target)
     if control is None:
         control = _get_control_host()
 
@@ -1148,21 +1196,21 @@ def setup_obsidian(
     auth_token = typer.prompt("Obsidian auth token")
     vault_name = typer.prompt("Obsidian vault name (exact match)")
 
-    _patch_secret(control, "openclaw", "openclaw-secrets", {
+    _patch_secret(control, cfg["namespace"], cfg["secret"], {
         "obsidian-auth-token": auth_token,
     })
 
-    # Create or update the vault name ConfigMap
+    # Create or update the vault name ConfigMap in the agent's namespace.
     _ssh(control,
-        f"sudo k3s kubectl -n openclaw create configmap obsidian-config"
+        f"sudo k3s kubectl -n {cfg['namespace']} create configmap obsidian-config"
         f" --from-literal=vault-name={_q(vault_name)}"
         f" --dry-run=client -o yaml"
         f" | sudo k3s kubectl apply -f -"
     )
 
-    _restart_deployment(control, "openclaw", "obsidian-sync")
+    _restart_deployment(control, cfg["namespace"], cfg["obsidian_deployment"])
 
-    console.print(f"\n[green]Obsidian Sync configured for vault '{vault_name}'.[/green]")
+    console.print(f"\n[green]Obsidian Sync configured for {target} (vault '{vault_name}').[/green]")
     console.print("The sync pod will start pulling your vault shortly.")
 
 
