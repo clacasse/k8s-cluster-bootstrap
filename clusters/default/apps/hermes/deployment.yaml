@@ -43,6 +43,12 @@ spec:
         # (compaction, terminal, memory, session reset, etc.).
         - name: bootstrap-config
           image: docker.io/nousresearch/hermes-agent:v2026.4.23
+          # Run as root so the chown at the end of the script can fix
+          # ownership of files this init writes for the hermes user
+          # (UID 10000) in the main container. The image's default user
+          # is hermes, which has write access but no CAP_CHOWN.
+          securityContext:
+            runAsUser: 0
           command: ["sh", "-c"]
           args:
             - |
