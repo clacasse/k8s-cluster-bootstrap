@@ -86,9 +86,13 @@ spec:
             - name: MODEL_BASE_URL
               value: http://llm-proxy.llama-cpp.svc.cluster.local:8080/v1
             - name: MCP_VAULT_SEARCH_URL
-              value: http://rag-mcp.rag.svc.cluster.local:8080/sse
+              value: http://rag-mcp.rag.svc.cluster.local:8080/mcp/
+            # Hermes infers transport from the URL shape (single
+            # /mcp/ endpoint = streamable-http). The transport key here
+            # is informational only — Hermes doesn't actually have a
+            # transport selector in its config schema.
             - name: MCP_VAULT_SEARCH_TRANSPORT
-              value: sse
+              value: streamable-http
           volumeMounts:
             - name: data
               mountPath: /opt/data

@@ -1,4 +1,10 @@
-"""MCP server exposing RAG search over the indexed vault."""
+"""MCP server exposing RAG search over the indexed vault.
+
+Serves the modern streamable-http transport on /mcp/ — the single endpoint
+that current MCP clients (Hermes, Claude Code, etc.) speak by default.
+The legacy SSE transport (separate /sse + /messages/ endpoints) is no
+longer wired up; nothing in this cluster consumes it.
+"""
 
 import logging
 import os
@@ -8,13 +14,7 @@ from pathlib import Path
 
 import chromadb
 import requests
-import uvicorn
 from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
-from mcp.server.transport_security import TransportSecuritySettings
-from starlette.applications import Starlette
-from starlette.responses import Response
-from starlette.routing import Mount, Route
 from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -183,22 +183,10 @@ if __name__ == "__main__":
     log.info(f"Embed model: {EMBED_MODEL}")
     log.info(f"Vault: {VAULT_PATH}")
 
-    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    sse = SseServerTransport("/messages/", security_settings=security)
-
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send  # type: ignore[attr-defined]
-        ) as (read_stream, write_stream):
-            await mcp._mcp_server.run(
-                read_stream, write_stream, mcp._mcp_server.create_initialization_options()
-            )
-        return Response()
-
-    app = Starlette(
-        routes=[
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # Streamable-HTTP transport. FastMCP exposes the protocol on a single
+    # /mcp/ endpoint that handles both initialize/list-tools/call-tool
+    # requests AND server-pushed notifications, all over POST. Clients
+    # connect with `url: http://host:port/mcp/`.
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = 8080
+    mcp.run(transport="streamable-http")
