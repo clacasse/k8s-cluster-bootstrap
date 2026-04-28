@@ -10,7 +10,7 @@ flowchart TB
 
     subgraph cluster["k3s cluster · VLAN 10 (192.168.10.0/24)"]
         direction TB
-        Ingress["Traefik Ingress<br/>*.apps wildcard DNS"]
+        Ingress["Traefik Ingress<br/>*.apps.home.arpa wildcard DNS"]
 
         subgraph appns["Application namespace · reference architecture"]
             direction LR

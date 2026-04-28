@@ -10,20 +10,20 @@ See [docs/architecture.md](./docs/architecture.md) for a Mermaid diagram of the 
 
 **Cluster + GitOps**
 - **k3s** cluster: 1 server + N agents (no HA). Node roles: `control`, `worker`, `gpu`, `storage`.
-- **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `https://argocd.apps`
+- **Argo CD** on the control node, reconciling from your instance repo via the app-of-apps pattern — at `https://argocd.apps.home.arpa`
 - **Traefik Ingress** (shipped with k3s) fronted by one wildcard DNS record — new apps never require touching the router
 
 **Local LLM stack** (all runs on your hardware, no API calls out)
 - **llama.cpp** chat server on the GPU node + embed server on CPU. OpenAI-compatible `/v1` API. Init containers pull GGUF weights from HuggingFace on first boot. Built-in support for MoE expert offloading (`--cpu-moe` / `--n-cpu-moe`) so 30B-class MoEs run on a 16 GB-class GPU.
 - **llm-proxy** in front of the chat server — logs every request as JSONL, exports per-call latency metrics, lets you replay traffic without enabling llama.cpp's own slow-path logger.
-- **Hermes** agent runtime at `https://hermes.apps`. Telegram + Discord + Slack channels for chat; MCP support for tool wiring; Obsidian vault as the workspace; persistent memory + skills. Image consumed directly from Docker Hub (`docker.io/nousresearch/hermes-agent`); model defaults overlaid via a bootstrap-config init container that reads from the `hermes-model` ConfigMap so `llama set-chat` propagates atomically.
+- **Hermes** agent runtime at `https://hermes.apps.home.arpa`. Telegram + Discord + Slack channels for chat; MCP support for tool wiring; Obsidian vault as the workspace; persistent memory + skills. Image consumed directly from Docker Hub (`docker.io/nousresearch/hermes-agent`); model defaults overlaid via a bootstrap-config init container that reads from the `hermes-model` ConfigMap so `llama set-chat` propagates atomically.
 - **RAG pipeline**: ChromaDB + a vault indexer + an MCP server exposing semantic search over your notes.
 - Model + tunable settings managed via `cluster_manager.py llama …` — chat model choice is per-deployment (the upstream template ships no opinion about which model your cluster runs).
 
 **Infrastructure**
 - **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases installed by default
 - **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps provision their own buckets via `provision-s3-app`
-- **Prometheus + Grafana** at `https://grafana.apps` with node + GPU + LLM-inference dashboards out of the box
+- **Prometheus + Grafana** at `https://grafana.apps.home.arpa` with node + GPU + LLM-inference dashboards out of the box
 - **DCGM exporter** for NVIDIA GPU metrics; **NFD** auto-labels nodes with hardware info; **NVIDIA device plugin** so pods can request `nvidia.com/gpu: 1`
 
 **Tooling**
@@ -41,7 +41,7 @@ k8s-cluster-bootstrap (upstream)        my-cluster (instance)
 ├── scripts/cluster_manager.py        ├── scripts/cluster_manager.py
 ├── clusters/                         ├── clusters/
 │   repoURL: REPO_URL                 │   repoURL: https://github.com/you/my-cluster
-│   host: argocd.APPS_DOMAIN          │   host: argocd.apps
+│   host: argocd.APPS_DOMAIN          │   host: argocd.apps.home.arpa
 └── README.md                         ├── ansible/inventory.ini
                                       └── your custom apps...
 ```
@@ -55,7 +55,7 @@ To pull upstream improvements into your instance later:
 
 Four roles, one VLAN, wildcard DNS funnels every app hostname through Traefik on the control node. See [docs/architecture.md](./docs/architecture.md) for a rendered diagram covering the cluster + the generic application reference architecture.
 
-- **control** node runs the k3s server, Traefik Ingress, Argo CD, and the agent runtime. Stable, always-on. `*.apps` resolves here via a single wildcard A record on your router.
+- **control** node runs the k3s server, Traefik Ingress, Argo CD, and the agent runtime. Stable, always-on. `*.apps.home.arpa` resolves here via a single wildcard A record on your router.
 - **gpu** node is single-purpose: NVIDIA GPU + 32 GB-ish host RAM, runs `llama-chat` and `llama-embed`. Tainted with `nvidia.com/gpu=true:NoSchedule` so random workloads don't steal it.
 - **storage** node holds all the stateful services — Postgres clusters, the Garage object store, ChromaDB. Tainted with `role=storage:NoSchedule` and PVCs pin there via `local-path`.
 - **worker** nodes are optional general compute; scale however you like.
@@ -78,15 +78,15 @@ Four roles, one VLAN, wildcard DNS funnels every app hostname through Traefik on
 
 ### Network (one-time wildcard DNS)
 
-Add one wildcard DNS A record to your router so `*.apps` resolves to the control node's IP. After this, every future app gets a free hostname — no per-app DNS.
+Add one wildcard DNS A record to your router so `*.apps.home.arpa` resolves to the control node's IP. After this, every future app gets a free hostname — no per-app DNS.
 
 **UniFi / Ubiquiti:**
 1. Network app → **Settings** → **Routing** → **DNS** → **DNS Entries**
 2. **Create Entry**:
    - Record type: `A`
-   - Hostname: `*.apps`
+   - Hostname: `*.apps.home.arpa`
    - IP Address: the control node's IP (check with `ssh k3s-control hostname -I`)
-3. Apply. Verify: `dig +short argocd.apps` should print the control node IP.
+3. Apply. Verify: `dig +short argocd.apps.home.arpa` should print the control node IP.
 
 If you use a different router, make the equivalent wildcard A record. If you want a different domain, pass `--apps-domain <your.domain>` to `init-fork`.
 
@@ -205,7 +205,7 @@ After `bootstrap` finishes, Argo CD reconciles the NVIDIA device plugin, its own
 ssh k3s-control sudo k3s kubectl -n argocd get applications
 ```
 
-Then open **`https://argocd.apps`**. The initial admin password:
+Then open **`https://argocd.apps.home.arpa`**. The initial admin password:
 
 ```bash
 ssh k3s-control sudo k3s kubectl -n argocd get secret argocd-initial-admin-secret \
@@ -467,7 +467,7 @@ This fetches from `upstream/main`, merges, and re-runs `init-fork` to replace an
 
 Pure git workflow — no Ansible, no DNS:
 
-1. Create `clusters/default/apps/<name>/` with raw Kubernetes manifests (include an Ingress for `<name>.apps` if you want a hostname).
+1. Create `clusters/default/apps/<name>/` with raw Kubernetes manifests (include an Ingress for `<name>.apps.home.arpa` if you want a hostname).
 2. For AI workloads, include `nodeSelector: nvidia.com/gpu: "true"` and the matching toleration.
 3. Create `clusters/default/applications/children/<name>.yaml` — an Argo `Application` pointing at that path.
 4. Commit + push. Argo picks it up automatically via `selfHeal: true`.
@@ -655,7 +655,7 @@ Chat-model GGUF + tunables are deliberately NOT pinned in git — see [Local LLM
 | GPU scheduling | Label + taint + toleration on `nvidia.com/gpu` | Matches NVIDIA GPU Operator convention |
 | Bootstrap driver | Ansible behind a typer CLI | Idempotent roles, one operator entrypoint |
 | Node addressability | Router DNS (`<name>`) | No DHCP-reservation bookkeeping |
-| App addressability | Wildcard DNS (`*.apps`) + Traefik Ingress | One-time DNS; new apps add no manual steps |
+| App addressability | Wildcard DNS (`*.apps.home.arpa`) + Traefik Ingress | One-time DNS; new apps add no manual steps |
 | GitOps tool | Argo CD | UI is useful; app-of-apps pattern |
 | App delivery | Committed Application manifests + `init-fork` | Adding apps is pure git |
 | Model storage | Persistent local-path PVC on GPU node | Ephemeral = OS; don't re-pull large models |
