@@ -1,6 +1,6 @@
 """Transparent OpenAI-compatible proxy with full request logging.
 
-Sits between an agent framework (OpenClaw, Cline, etc.) and a downstream
+Sits between an agent framework (Hermes, Cline, etc.) and a downstream
 inference server (llama.cpp, vLLM, ...) and:
 
   - passes through every request unchanged (preserving SSE streaming)
@@ -49,8 +49,8 @@ def _strip_reasoning_content(messages: list) -> int:
     """Remove `reasoning_content` from assistant messages, in place.
 
     Thinking-model servers (Qwen3, DeepSeek, ...) emit a `reasoning_content`
-    field carrying the model's chain-of-thought. Clients like OpenClaw store
-    it and replay it in subsequent requests. The Qwen chat template then
+    field carrying the model's chain-of-thought. Some clients store it and
+    replay it in subsequent requests. The Qwen chat template then
     decides per-render whether to wrap each prior message with `<think>`
     blocks based on `last_query_index` — so the same message position
     serializes differently turn-to-turn, blowing llama.cpp's prompt cache.
@@ -167,7 +167,7 @@ async def proxy(request: Request, path: str) -> Response:
     #                     (queue + prompt eval + first-token gen)
     #   ttft_ms = receive → first byte (sum of the two)
     # Splitting them lets us tell "proxy is slow" from "llama is slow"
-    # from "OpenClaw was slow before calling us at all".
+    # from "the agent was slow before calling us at all".
     t_send = time.monotonic()
 
     if is_streaming:
