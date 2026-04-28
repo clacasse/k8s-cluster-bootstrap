@@ -77,12 +77,21 @@ spec:
               "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
               "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
               # Init container runs as root; the main container runs as
-              # UID 10000. Chown only the config file we wrote — chowning
-              # the whole vault recursively would be expensive on a large
-              # vault, and obsidian-sync already keeps the rest at
-              # 10000:10000 (PUID/PGID match in apps/hermes/obsidian-sync.yaml).
+              # UID 10000. The image's entrypoint creates Hermes's
+              # subdirs (sessions, logs, memories, skills, ...) as root
+              # but doesn't chown them when HERMES_HOME is already
+              # hermes-owned at the top level — meaning the gateway
+              # crashlooops on Permission denied writing to /vault/logs/
+              # the first time it tries to log.
+              #
+              # Pre-create + chown the subdirs ourselves. Cheap (no recursive
+              # walk of the vault), idempotent.
+              for sub in cron sessions logs hooks memories skills skins plans workspace home; do
+                mkdir -p "$HERMES_HOME/$sub"
+                chown 10000:10000 "$HERMES_HOME/$sub" 2>/dev/null || true
+              done
               chown 10000:10000 "$cfg" 2>/dev/null || true
-              echo "[bootstrap] applied model + MCP overlay"
+              echo "[bootstrap] applied model + MCP overlay; subdirs chowned"
           env:
             - name: MODEL_DEFAULT
               valueFrom:
