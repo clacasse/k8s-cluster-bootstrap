@@ -539,6 +539,7 @@ Pure git workflow — no Ansible, no DNS:
 | `setup-slack` / `remove-slack` | Configure or remove Slack bot + app tokens for OpenClaw. |
 | `setup-telegram [--target <agent>]` / `remove-telegram [--target <agent>]` | Configure or remove the Telegram bot token for the chosen agent (`openclaw` default, or `hermes`). One bot per polling client — migrate a token by `remove`-ing from the old target first, then `setup`-ing on the new one. |
 | `setup-obsidian [--target <agent>]` | Configure Obsidian Sync for the chosen agent's workspace. Each agent owns its own vault PVC; both stay aligned via the shared upstream Obsidian Sync vault. |
+| `remove-obsidian [--target <agent>]` | Stop syncing for the chosen agent — removes the auth-token Secret key + deletes the obsidian-config ConfigMap, restarts the sync sidecar if present. Vault PVC contents preserved. |
 | `approve-pairing <channel> <code> [--target <agent>]` | Approve a user's pairing request (e.g. `telegram HPP2WU9B --target hermes`). Default target is `openclaw`. Both agents support the pairing flow — user messages the bot, gets a code, operator approves. |
 | `allow-user <id> [--target <agent>]` | Allowlist a numeric Telegram user ID (or comma-separated list) for an allowlist-style agent. Hermes only — OpenClaw uses pairing codes. Get your numeric ID from `@userinfobot` on Telegram. Each call REPLACES the existing list. |
 
@@ -614,7 +615,8 @@ Pure git workflow — no Ansible, no DNS:
             ├── garage/                  # configmap + service + statefulset
             ├── grafana-dashboards/      # ConfigMap-shipped dashboards (LLM, GPU, nodes)
             ├── llama-cpp/               # default ConfigMap + chat + embed deployments
-            ├── obsidian-sync/           # Headless Obsidian Sync for openclaw workspace
+            ├── obsidian-sync/           # legacy: holds openclaw vault PVC
+            │                             # (sync moved per-agent to apps/<agent>/obsidian-sync.yaml)
             ├── openclaw/                # the agent gateway
             ├── hermes/                  # alternate agent runtime
             │                             #   - configmap.yaml: hermes-model active served-as

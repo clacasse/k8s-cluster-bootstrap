@@ -1,3 +1,14 @@
+# OpenClaw-side vault PVCs.
+#
+# The obsidian-sync Deployment that previously lived alongside these
+# PVCs has been removed — sync responsibility moved per-agent (see
+# clusters/default/apps/hermes/obsidian-sync.yaml). The PVCs stay here
+# because the openclaw Deployment still mounts obsidian-vault at /vault;
+# pruning them would crash openclaw and lose the last-synced vault
+# snapshot.
+#
+# When openclaw is fully retired, this directory + its Argo Application
+# can be deleted entirely.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

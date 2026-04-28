@@ -1228,6 +1228,53 @@ def setup_obsidian(
     console.print("The sync pod will start pulling your vault shortly.")
 
 
+@app.command("remove-obsidian")
+def remove_obsidian(
+    target: str = typer.Option(
+        "openclaw", "--target", "-t",
+        help=f"Agent to remove Obsidian Sync from. One of {list(_AGENT_TARGETS)}.",
+    ),
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Stop syncing the Obsidian vault for the chosen agent.
+
+    Removes the obsidian-auth-token from the agent's Secret and deletes
+    the obsidian-config ConfigMap so the sync sidecar (if any) idles
+    without auth on its next restart. The vault PVC contents are
+    preserved — only the credential and config are removed.
+
+    Useful when retiring an agent or migrating sync responsibility to
+    another agent without touching the vault data itself.
+    """
+    cfg = _resolve_agent_target(target)
+    if control is None:
+        control = _get_control_host()
+
+    if not typer.confirm(f"This will stop Obsidian Sync for {target} (PVC contents preserved). Continue?"):
+        raise typer.Exit(0)
+
+    console.print(f"[dim]via {control}[/dim]\n")
+
+    _patch_secret(control, cfg["namespace"], cfg["secret"], {
+        "obsidian-auth-token": None,
+    })
+    _ssh(control,
+        f"sudo k3s kubectl -n {_q(cfg['namespace'])} delete configmap obsidian-config"
+        f" --ignore-not-found",
+    )
+    # Best-effort restart — the deployment may not exist (e.g. openclaw
+    # side after the obsidian-sync Deployment was pruned). Catch the
+    # failure and move on.
+    if _kubectl_exists(control, cfg["namespace"], "deployment", cfg["obsidian_deployment"]):
+        _restart_deployment(control, cfg["namespace"], cfg["obsidian_deployment"])
+        console.print(f"[green]Obsidian Sync stopped for {target}. {cfg['obsidian_deployment']} restarting (will idle without auth).[/green]")
+    else:
+        console.print(f"[green]Obsidian Sync credentials removed for {target}. No {cfg['obsidian_deployment']} deployment running.[/green]")
+
+
 @app.command("approve-pairing")
 def approve_pairing(
     channel: str = typer.Argument(..., help="Channel type (e.g. slack, telegram, whatsapp)."),
