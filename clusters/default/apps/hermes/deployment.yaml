@@ -52,14 +52,9 @@ spec:
           args:
             - |
               set -e
-              # HERMES_HOME points at the obsidian vault PVC so all of
-              # Hermes's state (config, skills, memories, sessions,
-              # persona files) lives in one place: the same vault the
-              # user edits in Obsidian. obsidian-sync keeps it aligned
-              # with the upstream cloud vault. Trade-off: the .env,
-              # session jsonl, and logs/ subdirs sync to other devices
-              # too — add ignore patterns in Obsidian's sync settings
-              # if that's not desired.
+              # HERMES_HOME = /vault: Hermes's entire state (config,
+              # skills, memories, sessions, persona) lives in the vault
+              # PVC, syncing to all the user's devices via Obsidian Sync.
               export HERMES_HOME=/vault
               cfg="$HERMES_HOME/config.yaml"
               H=/opt/hermes/.venv/bin/hermes
@@ -70,28 +65,17 @@ spec:
               "$H" config set model.default  "$MODEL_DEFAULT"
               "$H" config set model.provider "$MODEL_PROVIDER"
               "$H" config set model.base_url "$MODEL_BASE_URL"
-              # Wire up vault-search MCP. The rag pipeline (in the rag
-              # namespace) exposes its MCP server at the URL below;
-              # registering it here gives the agent semantic search over
-              # vault notes without needing a separate setup step.
+              # Wire up vault-search MCP. The rag pipeline exposes its
+              # MCP server at the URL below; registering it here gives
+              # the agent semantic search over vault notes.
               "$H" config set "mcp_servers.vault-search.url"       "$MCP_VAULT_SEARCH_URL"
               "$H" config set "mcp_servers.vault-search.transport" "$MCP_VAULT_SEARCH_TRANSPORT"
-              # Init container runs as root; the main container runs as
-              # UID 10000. The image's entrypoint creates Hermes's
-              # subdirs (sessions, logs, memories, skills, ...) as root
-              # but doesn't chown them when HERMES_HOME is already
-              # hermes-owned at the top level — meaning the gateway
-              # crashlooops on Permission denied writing to /vault/logs/
-              # the first time it tries to log.
-              #
-              # Pre-create + chown the subdirs ourselves. Cheap (no recursive
-              # walk of the vault), idempotent.
-              for sub in cron sessions logs hooks memories skills skins plans workspace home; do
-                mkdir -p "$HERMES_HOME/$sub"
-                chown 10000:10000 "$HERMES_HOME/$sub" 2>/dev/null || true
-              done
+              # Init runs as root; main runs as hermes (UID 10000).
+              # Chown only the config file so the runtime user can edit
+              # it. Other vault contents are already hermes-owned via
+              # obsidian-sync's PUID=10000.
               chown 10000:10000 "$cfg" 2>/dev/null || true
-              echo "[bootstrap] applied model + MCP overlay; subdirs chowned"
+              echo "[bootstrap] applied model + MCP overlay"
           env:
             - name: MODEL_DEFAULT
               valueFrom:
