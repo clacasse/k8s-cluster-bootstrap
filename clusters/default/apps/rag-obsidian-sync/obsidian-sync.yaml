@@ -61,7 +61,10 @@ spec:
         kubernetes.io/hostname: k3s-control
       containers:
         - name: obsidian-sync
-          image: ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+          # Pin to a tagged release so behavior is reproducible across
+          # pod restarts. Keep in sync with apps/hermes/obsidian-sync.yaml
+          # — both consume the same upstream image.
+          image: ghcr.io/belphemur/obsidian-headless-sync-docker:0.0.8
           env:
             - name: OBSIDIAN_AUTH_TOKEN
               valueFrom:

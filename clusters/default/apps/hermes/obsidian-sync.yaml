@@ -59,7 +59,11 @@ spec:
         kubernetes.io/hostname: k3s-control
       containers:
         - name: obsidian-sync
-          image: ghcr.io/belphemur/obsidian-headless-sync-docker:latest
+          # Pin to a tagged release so behavior is reproducible across pod
+          # restarts. Bump deliberately when upstream cuts a new tag —
+          # check ghcr.io/belphemur/obsidian-headless-sync-docker for the
+          # latest semver tag (currently 0.0.x).
+          image: ghcr.io/belphemur/obsidian-headless-sync-docker:0.0.8
           env:
             - name: OBSIDIAN_AUTH_TOKEN
               valueFrom:
