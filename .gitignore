@@ -8,8 +8,3 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
-
-# Operator scratch notes (date-stamped, instance-specific). Keep these
-# on the workstation, not in the template.
-docs/MORNING-*.md
-docs/NOTES-*.md
