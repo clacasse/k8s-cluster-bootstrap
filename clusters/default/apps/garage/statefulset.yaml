@@ -30,7 +30,7 @@ spec:
         - name: garage
           # Verify the latest stable tag in your fork; v1.2.0 is known-good as of
           # this writing. Also pinnable to a digest for reproducibility.
-          image: dxflrs/garage:v1.2.0
+          image: dxflrs/garage:v2.3.0
           imagePullPolicy: IfNotPresent
           # Image has no ENTRYPOINT; be explicit about both command and args.
           command: ["/garage"]
