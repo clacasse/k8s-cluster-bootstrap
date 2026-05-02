@@ -979,6 +979,172 @@ def setup_secrets(
         console.print(f"\n  [cyan]{grafana_password}[/cyan]\n")
 
 
+def _grafana_request(
+    url: str,
+    *,
+    method: str,
+    auth: tuple[str, str] | None = None,
+    bearer: str | None = None,
+    body: dict | None = None,
+) -> dict:
+    """Call the Grafana HTTP API. Self-signed cert → unverified TLS context.
+
+    Avoids adding `requests` as a dep — stdlib is sufficient for a few JSON
+    POSTs. Returns the decoded JSON response or {} for empty bodies.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if auth is not None:
+        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+        headers["Authorization"] = f"Basic {token}"
+    elif bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            payload = resp.read().decode() or "{}"
+            return json.loads(payload)
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        console.print(f"[red]Grafana API {method} {url} → {e.code}[/red]")
+        console.print(f"[dim]{body_text}[/dim]")
+        raise typer.Exit(1) from e
+    except urllib.error.URLError as e:
+        console.print(
+            f"[red]Could not reach Grafana at {url}: {e.reason}[/red]\n"
+            f"[dim]Wildcard DNS resolves on the LAN only — run this from a host "
+            f"that can hit *.{_get_apps_domain()}.[/dim]"
+        )
+        raise typer.Exit(1) from e
+
+
+@app.command("setup-grafana-mcp")
+def setup_grafana_mcp(
+    rotate: bool = typer.Option(
+        False, "--rotate",
+        help="If a claude-mcp service account already exists, delete it and "
+             "mint a fresh token. The old token will stop working.",
+    ),
+    control: str = typer.Option(
+        None, "--control", "-c",
+        help="Control node host. Auto-detected from inventory if not provided.",
+    ),
+) -> None:
+    """Provision a Grafana service-account token for the local Grafana MCP.
+
+    Creates a Viewer-role service account `claude-mcp` and mints a token,
+    then prints a Claude Code MCP config snippet. Run this on your
+    workstation — Grafana's hostname is reachable via the LAN's wildcard DNS.
+
+    Pairs with the `mcp-grafana` binary (https://github.com/grafana/mcp-grafana);
+    install that separately and paste the snippet into ~/.claude.json or a
+    project .mcp.json.
+    """
+    if control is None:
+        control = _get_control_host()
+
+    apps_domain = _get_apps_domain()
+    grafana_url = f"https://grafana.{apps_domain}"
+
+    if not _kubectl_exists(control, "monitoring", "secret", "grafana-admin"):
+        console.print(
+            "[red]grafana-admin secret missing — run setup-secrets first.[/red]"
+        )
+        raise typer.Exit(1)
+
+    r = _kubectl(
+        control, "-n", "monitoring", "get", "secret", "grafana-admin",
+        "-o", "jsonpath={.data.admin-password}",
+        capture=True, check=True,
+    )
+    admin_password = base64.b64decode((r.stdout or "").strip()).decode()
+    auth = ("admin", admin_password)
+
+    console.print(f"[dim]Grafana → {grafana_url}[/dim]\n")
+
+    sa_name = "claude-mcp"
+    search = _grafana_request(
+        f"{grafana_url}/api/serviceaccounts/search?query={sa_name}",
+        method="GET", auth=auth,
+    )
+    existing = next(
+        (sa for sa in search.get("serviceAccounts", []) if sa.get("name") == sa_name),
+        None,
+    )
+
+    if existing and not rotate:
+        console.print(
+            f"[yellow]Service account '{sa_name}' already exists "
+            f"(id={existing['id']}). Tokens can't be re-read once minted.\n"
+            f"Re-run with --rotate to delete it and issue a fresh token.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    if existing and rotate:
+        console.print(f"Deleting existing service account [cyan]{sa_name}[/cyan]")
+        _grafana_request(
+            f"{grafana_url}/api/serviceaccounts/{existing['id']}",
+            method="DELETE", auth=auth,
+        )
+
+    console.print(f"Creating service account [cyan]{sa_name}[/cyan] (Viewer)")
+    sa = _grafana_request(
+        f"{grafana_url}/api/serviceaccounts",
+        method="POST", auth=auth,
+        body={"name": sa_name, "role": "Viewer", "isDisabled": False},
+    )
+    sa_id = sa["id"]
+
+    console.print(f"Minting token")
+    token_resp = _grafana_request(
+        f"{grafana_url}/api/serviceaccounts/{sa_id}/tokens",
+        method="POST", auth=auth,
+        body={"name": f"{sa_name}-token"},
+    )
+    token = token_resp["key"]
+
+    snippet = json.dumps(
+        {
+            "mcpServers": {
+                "grafana": {
+                    "command": "mcp-grafana",
+                    "args": [],
+                    "env": {
+                        "GRAFANA_URL": grafana_url,
+                        "GRAFANA_API_KEY": token,
+                        "GRAFANA_TLS_SKIP_VERIFY": "true",
+                    },
+                },
+            },
+        },
+        indent=2,
+    )
+
+    console.print(f"\n[green]Token minted.[/green]")
+    console.print(
+        f"[bold]Add this to ~/.claude.json (or a project .mcp.json) and "
+        f"restart Claude Code:[/bold]\n"
+    )
+    console.print(snippet)
+    console.print(
+        f"\n[dim]Install the binary if you haven't:\n"
+        f"  brew install grafana/grafana/mcp-grafana   # if the tap is available\n"
+        f"  # otherwise download v0.13.1 from "
+        f"https://github.com/grafana/mcp-grafana/releases\n"
+        f"GRAFANA_TLS_SKIP_VERIFY=true is fine for LAN-only homelab self-signed "
+        f"certs.[/dim]"
+    )
+
+
 # Targets for the channel/integration commands. Each entry covers a
 # namespace + Secret + (optionally) an agent Deployment. Adding another
 # target is one entry here.

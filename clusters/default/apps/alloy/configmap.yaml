@@ -1,0 +1,75 @@
+# Alloy scrape config — runs as a DaemonSet, tails container logs from
+# /var/log/pods/<ns>_<pod>_<uid>/<container>/*.log on the local node, and
+# pushes to Loki. The DaemonSet sets NODE_NAME from spec.nodeName via the
+# alloy chart's extraEnv (see clusters/default/applications/children/alloy.yaml).
+#
+# The "configMap.create: false" pattern in the alloy chart means we own this
+# ConfigMap ourselves; the chart mounts it. Keeping it in git (separate Argo
+# Application) lets us iterate the scrape config without bumping the chart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: loki
+data:
+  config.alloy: |
+    // Discover pods on this node only — the field selector pushes the filter
+    // server-side to the Kubernetes API, which is much cheaper than client-side
+    // relabel-keep when the cluster grows.
+    discovery.kubernetes "pods" {
+      role = "pod"
+      selectors {
+        role  = "pod"
+        field = "spec.nodeName=" + sys.env("NODE_NAME")
+      }
+    }
+
+    // Promote useful Kubernetes metadata onto each log stream as Loki labels,
+    // and synthesize the on-disk log path. The K8s pod log path layout is:
+    //   /var/log/pods/<namespace>_<pod_name>_<pod_uid>/<container>/*.log
+    // We can match it with the glob /var/log/pods/*<uid>/<container>/*.log.
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        target_label  = "app"
+      }
+      rule {
+        action        = "replace"
+        source_labels = [
+          "__meta_kubernetes_pod_uid",
+          "__meta_kubernetes_pod_container_name",
+        ]
+        separator   = "/"
+        target_label = "__path__"
+        replacement = "/var/log/pods/*$1/*.log"
+      }
+    }
+
+    loki.source.file "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.write.default.receiver]
+    }
+
+    loki.write "default" {
+      endpoint {
+        url = "http://loki.loki.svc.cluster.local:3100/loki/api/v1/push"
+      }
+      external_labels = {
+        cluster = "homelab",
+        node    = sys.env("NODE_NAME"),
+      }
+    }

@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: alloy
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: alloy
+    targetRevision: 1.8.0
+    helm:
+      releaseName: alloy
+      values: |
+        # DaemonSet on every node, including the GPU + storage nodes — without
+        # broad tolerations the tainted nodes' pod logs would never reach Loki.
+        controller:
+          type: daemonset
+          tolerations:
+            - operator: Exists
+
+        alloy:
+          # We supply the scrape config ourselves via the alloy-config
+          # ConfigMap (managed by the alloy-config Argo Application).
+          configMap:
+            create: false
+            name: alloy-config
+            key: config.alloy
+          # Mount /var/log on the host so loki.source.file can tail
+          # /var/log/pods/.../*.log. dockercontainers is harmless on k3s
+          # (containerd) but lets us read the symlink targets if any.
+          mounts:
+            varlog: true
+            dockercontainers: true
+          # Expose NODE_NAME inside the pod — the scrape config reads this
+          # via sys.env() to filter discovery by node and to label streams.
+          extraEnv:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          # No clustering — single-node-each, push directly to Loki.
+          clustering:
+            enabled: false
+
+        serviceMonitor:
+          enabled: true
+          additionalLabels:
+            release: kube-prometheus-stack
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loki
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

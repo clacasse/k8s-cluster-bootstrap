@@ -1,0 +1,134 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki
+    targetRevision: 7.0.0
+    helm:
+      releaseName: loki
+      values: |
+        # Single-binary mode is the supported homelab path. All Loki
+        # components (distributor, ingester, querier, ruler, compactor) run in
+        # one pod. Chunks land in Garage S3; WAL + index cache are on a small
+        # local-path PVC pinned to the storage node.
+        deploymentMode: SingleBinary
+
+        loki:
+          auth_enabled: false
+
+          # Pin schema to a single tsdb/v13 entry from cluster epoch. Adding
+          # entries here later is a schema migration — be deliberate.
+          schemaConfig:
+            configs:
+              - from: "2026-01-01"
+                store: tsdb
+                object_store: s3
+                schema: v13
+                index:
+                  prefix: loki_index_
+                  period: 24h
+
+          storage:
+            type: s3
+            bucketNames:
+              chunks: loki-chunks
+              ruler:  loki-chunks
+              admin:  loki-chunks
+            s3:
+              endpoint: garage.garage.svc.cluster.local:3900
+              s3ForcePathStyle: true
+              insecure: true
+              region: garage
+              # Credentials come in via env vars — see extraEnv below.
+              # access_key_id / secret_access_key are interpolated by Loki at
+              # startup (-config.expand-env=true).
+              accessKeyId: ${LOKI_S3_ACCESS_KEY_ID}
+              secretAccessKey: ${LOKI_S3_SECRET_ACCESS_KEY}
+
+          limits_config:
+            retention_period: 168h        # 7 days
+            reject_old_samples: true
+            reject_old_samples_max_age: 24h
+
+          compactor:
+            retention_enabled: true
+            delete_request_store: s3
+
+        # Single binary configuration — pin to the storage node, mount the
+        # loki-s3 Secret as env vars, expand them in the rendered config.
+        singleBinary:
+          replicas: 1
+          persistence:
+            enabled: true
+            storageClass: local-path
+            accessModes:
+              - ReadWriteOnce
+            size: 10Gi
+          nodeSelector:
+            role: storage
+          tolerations:
+            - { key: role, operator: Equal, value: storage, effect: NoSchedule }
+          extraArgs:
+            - -config.expand-env=true
+          extraEnv:
+            - name: LOKI_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: loki-s3
+                  key: accessKeyId
+            - name: LOKI_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loki-s3
+                  key: secretAccessKey
+
+        # Disable the SimpleScalable / Distributed components — singleBinary
+        # owns it all.
+        read:    { replicas: 0 }
+        write:   { replicas: 0 }
+        backend: { replicas: 0 }
+
+        # No memcached: traffic is low and the local-path PVC handles index.
+        chunksCache:  { enabled: false }
+        resultsCache: { enabled: false }
+
+        # No nginx gateway in singleBinary mode — Alloy pushes straight to the
+        # loki Service.
+        gateway:
+          enabled: false
+
+        # No self-monitoring (would pull in another grafana-agent operator).
+        # Just expose the Loki /metrics endpoint to Prometheus via the chart's
+        # built-in ServiceMonitor.
+        monitoring:
+          selfMonitoring:
+            enabled: false
+            grafanaAgent:
+              installOperator: false
+          lokiCanary:
+            enabled: false
+          serviceMonitor:
+            enabled: true
+            labels:
+              release: kube-prometheus-stack
+
+        # Test pod is noisy, drop it.
+        test:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loki
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

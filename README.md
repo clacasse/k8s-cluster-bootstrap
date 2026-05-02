@@ -24,6 +24,7 @@ See [docs/architecture.md](./docs/architecture.md) for a Mermaid diagram of the 
 - **CloudNativePG operator** in `cnpg-system` — consumer apps create their own `Cluster` CRs; no databases installed by default
 - **Garage (S3-compatible object store)** pinned to the storage node with `local-path` PVC — consumer apps provision their own buckets via `provision-s3-app`
 - **Prometheus + Grafana** at `https://grafana.apps.home.arpa` with node + GPU + LLM-inference dashboards out of the box
+- **Loki + Grafana Alloy** for cluster-wide log aggregation — Alloy DaemonSet tails every pod's logs, ships to Loki (chunks land in Garage S3, 7-day retention), and the Loki datasource is wired into Grafana automatically. Pair with the Grafana MCP server (`setup-grafana-mcp`) to let Claude Code query logs while you debug.
 - **DCGM exporter** for NVIDIA GPU metrics; **NFD** auto-labels nodes with hardware info; **NVIDIA device plugin** so pods can request `nvidia.com/gpu: 1`
 
 **Tooling**
@@ -416,6 +417,30 @@ docker run --rm -it --entrypoint get-token ghcr.io/belphemur/obsidian-headless-s
 
 The sync pod keeps `hermes-vault` in lockstep with the upstream Obsidian Sync vault. Hermes reads from `/vault` as its workspace, alongside its own `/opt/data` for runtime state (sessions, memories, the FTS5 SQLite session store).
 
+### Connect Claude Code to Grafana (logs + metrics MCP)
+
+The cluster ships Loki + Alloy out of the box — every pod's logs land in Loki with 7-day retention. Wire that into Claude Code via the [Grafana MCP server](https://github.com/grafana/mcp-grafana) so Claude can run LogQL/PromQL queries while you debug a freshly deployed service.
+
+```bash
+# 1. Provision a Garage S3 bucket + Secret for Loki (one-time, after first
+#    `bootstrap-infra-secrets`). Names align with what `loki.yaml` expects:
+./scripts/cluster_manager.py provision-s3-app \
+    --app loki --namespace loki --buckets loki-chunks
+
+# 2. Mint a Viewer-role Grafana service account token and print a
+#    ready-to-paste Claude Code MCP config:
+./scripts/cluster_manager.py setup-grafana-mcp
+
+# 3. Install the mcp-grafana binary on your workstation:
+brew install grafana/grafana/mcp-grafana
+# or download v0.13.1+ from https://github.com/grafana/mcp-grafana/releases
+#   and put it on your $PATH.
+```
+
+Paste the printed JSON into `~/.claude.json` (or any project's `.mcp.json`) and restart Claude Code. The session will have a `grafana` MCP server with tools for querying Loki logs, Prometheus metrics, listing dashboards, and a few more. The token is read-only — write/delete operations against Grafana fail with 403.
+
+Self-signed wildcard cert means the snippet sets `GRAFANA_TLS_SKIP_VERIFY=true`. Fine for LAN-only homelab; flip it back if Grafana ever leaves the LAN.
+
 ### Convert instance repo from public to private
 
 Mirrors the flow used by `private-apps setup`: a per-repo ed25519 deploy key, paired with an Argo Repository Secret, replacing anonymous-HTTPS git access. Useful when an instance repo started public (e.g. while iterating on the upstream template) and you now want to keep its history off the public internet.
@@ -499,6 +524,7 @@ Pure git workflow — no Ansible, no DNS:
 | `setup-secrets` | Generate wildcard TLS cert + Grafana admin password. Idempotent. |
 | `bootstrap-infra-secrets` | Generate Garage's auth tokens, create the `garage-auth` Secret, apply the single-node Garage layout. |
 | `setup-instance-repo` | Apply the Argo Repository Secret + patch live root Application when the instance repo is private (SSH). No-op for HTTPS repos. |
+| `setup-grafana-mcp [--rotate]` | Create a Viewer-role Grafana service account `claude-mcp`, mint a token, and print a Claude Code MCP config snippet. Pairs with the `mcp-grafana` binary running locally. `--rotate` deletes the existing service account and issues a fresh token. |
 | `llama setup` | Interactive prompt for every chat-model knob — repo / file / served-as alias / ctx / GPU layers / parallel slots / KV cache type / flash-attn / `--cpu-moe` / `--n-cpu-moe` / `--override-tensor` / extra flags. Writes the imperative `llama-cpp/llama-cpp-model` ConfigMap + keeps `hermes/hermes-model` in sync. |
 
 ### Day-to-day
@@ -576,6 +602,8 @@ Pure git workflow — no Ansible, no DNS:
         ├── applications/
         │   ├── root.yaml               # app-of-apps, applied by Ansible
         │   └── children/               # reconciled by root
+        │       ├── alloy.yaml          # Grafana Alloy DaemonSet — pod log shipper
+        │       ├── alloy-config.yaml   # Alloy scrape config (River) reconciled from git
         │       ├── argocd-ingress.yaml
         │       ├── chromadb.yaml
         │       ├── cloudnative-pg.yaml  # CNPG operator (Helm; no Cluster CR)
@@ -584,6 +612,7 @@ Pure git workflow — no Ansible, no DNS:
         │       ├── grafana-dashboards.yaml
         │       ├── kube-prometheus-stack.yaml
         │       ├── llama-cpp.yaml       # llama-chat + llama-embed pods
+        │       ├── loki.yaml            # Loki SingleBinary, chunks → Garage S3
         │       ├── node-feature-discovery.yaml
         │       ├── nvidia-device-plugin.yaml
         │       ├── hermes.yaml          # the agent runtime
@@ -593,6 +622,7 @@ Pure git workflow — no Ansible, no DNS:
         │       ├── rag-mcp.yaml
         │       └── traefik-tls.yaml
         └── apps/                       # raw k8s manifests, reconciled by Argo
+            ├── alloy/                   # ConfigMap with Alloy scrape config (config.alloy)
             ├── argocd-ingress/
             ├── chromadb/                # vector DB for the RAG pipeline
             ├── garage/                  # configmap + service + statefulset
