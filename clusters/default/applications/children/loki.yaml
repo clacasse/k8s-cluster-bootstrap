@@ -64,6 +64,14 @@ spec:
             retention_period: 168h        # 7 days
             reject_old_samples: true
             reject_old_samples_max_age: 24h
+            # Chart default of 4 MB/s, 6 MB burst is too tight for a cluster
+            # where Loki self-logs huge per-query metric lines (~5-10 KB) on
+            # every Grafana Explore refresh. The lines flow back into Loki
+            # via Alloy and trip the ingestion limit, dropping logs. Bump
+            # generously — a homelab cluster won't push these limits, and
+            # SingleBinary on local-path can absorb the burst.
+            ingestion_rate_mb: 32
+            ingestion_burst_size_mb: 64
 
           compactor:
             retention_enabled: true
