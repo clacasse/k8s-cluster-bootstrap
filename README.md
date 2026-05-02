@@ -431,10 +431,14 @@ The cluster ships Loki + Alloy out of the box — every pod's logs land in Loki 
 #    ready-to-paste Claude Code MCP config:
 ./scripts/cluster_manager.py setup-grafana-mcp
 
-# 3. Install the mcp-grafana binary on your workstation:
-brew install grafana/grafana/mcp-grafana
-# or download v0.13.1+ from https://github.com/grafana/mcp-grafana/releases
-#   and put it on your $PATH.
+# 3. Install the mcp-grafana binary on your workstation. There's no homebrew
+#    formula yet, so use one of these:
+#    a) go install (if Go is installed):
+GOBIN="$HOME/go/bin" go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@v0.13.1
+#    b) prebuilt tarball from the releases page:
+curl -fsSL https://github.com/grafana/mcp-grafana/releases/download/v0.13.1/mcp-grafana_Darwin_arm64.tar.gz \
+    | tar -xz -C /tmp && sudo mv /tmp/mcp-grafana /usr/local/bin/
+#    See https://github.com/grafana/mcp-grafana/releases for other arches.
 ```
 
 Paste the printed JSON into `~/.claude.json` (or any project's `.mcp.json`) and restart Claude Code. The session will have a `grafana` MCP server with tools for querying Loki logs, Prometheus metrics, listing dashboards, and a few more. The token is read-only — write/delete operations against Grafana fail with 403.

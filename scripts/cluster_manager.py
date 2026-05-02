@@ -1136,9 +1136,10 @@ def setup_grafana_mcp(
     )
     console.print(snippet)
     console.print(
-        f"\n[dim]Install the binary if you haven't:\n"
-        f"  brew install grafana/grafana/mcp-grafana   # if the tap is available\n"
-        f"  # otherwise download v0.13.1 from "
+        f"\n[dim]Install the binary if you haven't (no homebrew formula yet):\n"
+        f"  GOBIN=\"$HOME/go/bin\" go install "
+        f"github.com/grafana/mcp-grafana/cmd/mcp-grafana@v0.13.1\n"
+        f"  # or grab a prebuilt tarball from "
         f"https://github.com/grafana/mcp-grafana/releases\n"
         f"GRAFANA_TLS_SKIP_VERIFY=true is fine for LAN-only homelab self-signed "
         f"certs.[/dim]"
