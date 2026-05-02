@@ -59,8 +59,16 @@ data:
       }
     }
 
+    // loki.source.file stats __path__ literally — it doesn't glob. Run the
+    // relabel output through local.file_match first so the
+    // /var/log/pods/*<uid>/<container>/*.log glob actually expands to the
+    // real <namespace>_<pod>_<uid> directories on disk.
+    local.file_match "pods" {
+      path_targets = discovery.relabel.pods.output
+    }
+
     loki.source.file "pods" {
-      targets    = discovery.relabel.pods.output
+      targets    = local.file_match.pods.targets
       forward_to = [loki.write.default.receiver]
     }
 
