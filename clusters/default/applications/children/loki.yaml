@@ -23,6 +23,14 @@ spec:
         loki:
           auth_enabled: false
 
+          # The chart defaults common.replication_factor to 3 — fine for the
+          # SimpleScalable / Distributed modes but fatal in SingleBinary
+          # mode with replicas=1: every read needs a quorum of 3 ingesters
+          # and only 1 exists, so all queries return "too many unhealthy
+          # instances in the ring". Pin RF to match the single replica.
+          commonConfig:
+            replication_factor: 1
+
           # Pin schema to a single tsdb/v13 entry from cluster epoch. Adding
           # entries here later is a schema migration — be deliberate.
           schemaConfig:
