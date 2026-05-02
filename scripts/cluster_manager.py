@@ -3006,7 +3006,6 @@ def add_repo_secret(
 
 _KEY_ID_RE = re.compile(r"Key ID:\s*(\S+)")
 _SECRET_RE = re.compile(r"Secret key:\s*(\S+)")
-_KEY_LIST_LINE_RE = re.compile(r"^\s*(GK\S+)\s+(\S+)\s*$")
 
 
 def _parse_garage_key_info(stdout: str) -> tuple[str, str]:
@@ -3024,6 +3023,12 @@ def _garage_list_keys(control: str) -> list[tuple[str, str]]:
 
     Garage allows duplicate key names, so we always use the access-key ID for
     disambiguation once we've picked which key to work with.
+
+    Garage v2's `key list` output has columns: ID, Created, Name, Expiration.
+    The Created column is blank for keys that pre-existed the v1→v2 upgrade,
+    so a column-count match is unreliable. Identify the ID column by its
+    `GK`-prefixed token, then take the second-to-last whitespace-separated
+    field as the name (last is the expiration: "never" or a date).
     """
     r = _kubectl(
         control, "-n", "garage", "exec", "garage-0", "--",
@@ -3031,9 +3036,9 @@ def _garage_list_keys(control: str) -> list[tuple[str, str]]:
     )
     keys: list[tuple[str, str]] = []
     for line in (r.stdout or "").splitlines():
-        m = _KEY_LIST_LINE_RE.match(line)
-        if m:
-            keys.append((m.group(1), m.group(2)))
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].startswith("GK"):
+            keys.append((parts[0], parts[-2]))
     return keys
 
 
